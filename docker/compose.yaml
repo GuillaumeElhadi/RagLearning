@@ -1,0 +1,14 @@
+services:
+  db:
+    image: pgvector/pgvector:pg18-trixie
+    environment:
+      POSTGRES_DB: ragdb
+      POSTGRES_USER: raguser
+      POSTGRES_PASSWORD: mysecretpassword
+    volumes:
+      - pgvector-data:/var/lib/postgresql
+    ports:
+      - "5433:5432"
+
+volumes:
+  pgvector-data:
