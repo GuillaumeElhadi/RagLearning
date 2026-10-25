@@ -16,7 +16,10 @@ import java.util.Locale;
 
 @Component
 @RequiredArgsConstructor
-@ConditionalOnProperty(value = "rag.ingestion.enabled", havingValue = "true")
+@ConditionalOnProperty(
+    value = "rag.ingestion.enabled",
+    havingValue = "true"
+)
 public class CommandLineIngestor implements CommandLineRunner {
 
     private final RagIngestorService ragIngestorService;
@@ -26,16 +29,13 @@ public class CommandLineIngestor implements CommandLineRunner {
 
     @Override
     public void run(String @NonNull ... args) throws Exception {
-
-        if (ragIngestorService != null) {
-            try (var files = Files.list(Path.of(ragIngestionSourceDir))) {
-                files.filter(Files::isRegularFile)
-                     .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".pdf"))
-                     .sorted(Comparator.naturalOrder())
-                     .forEach(path -> ragIngestorService.ingestPdf(path.toString()));
-            } catch (IOException exception) {
-                throw new IOException("Unable to read PDF files from the " + ragIngestionSourceDir + " directory", exception);
-            }
+        try (var files = Files.list(Path.of(ragIngestionSourceDir))) {
+            files.filter(Files::isRegularFile)
+                 .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".pdf"))
+                 .sorted(Comparator.naturalOrder())
+                 .forEach(path -> ragIngestorService.ingestPdf(path.toString()));
+        } catch (IOException exception) {
+            throw new IOException("Unable to read PDF files from the " + ragIngestionSourceDir + " directory", exception);
         }
     }
 }
