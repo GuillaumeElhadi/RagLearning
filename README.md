@@ -48,7 +48,7 @@ docker compose -f docker/compose.yaml up -d
 
 Au premier démarrage, Spring AI crée lui-même les extensions, la table `vector_store` et son index.
 
-Les PDF à indexer sont placés dans le dossier `sources/`.
+Les PDF à indexer sont placés dans le dossier `sources/` (configurable, voir plus bas). Au démarrage, l'application **ingère tous les PDF de ce dossier** (voir [Ingestion](#ingestion)).
 
 ## Configuration
 
@@ -95,12 +95,59 @@ Les PDF à indexer sont placés dans le dossier `sources/`.
 |-----------|---------------|
 | `spring.ai.anthropic.api-key=${ANTHROPIC_API_KEY}` | Clé lue depuis l'environnement, jamais en dur |
 
+**Application**
+
+| Propriété | Signification |
+|-----------|---------------|
+| `rag.ingestion.source-dir=sources` | Dossier des PDF à ingérer, relatif au dossier de lancement. Valeur par défaut surchargeable sans toucher au fichier : une variable d'environnement ou un argument de ligne de commande est prioritaire sur `application.properties` (*relaxed binding* : `RAG_INGESTION_SOURCEDIR`, `--rag.ingestion.source-dir=...`). |
+
+⚠️ Ne pas écrire `rag.ingestion.source-dir=${rag.ingestion.source-dir:sources}` : la propriété se référence elle-même et Spring échoue au démarrage (référence circulaire).
+
 **Diagnostic (optionnel)**
 
 ```properties
 logging.level.org.springframework.jdbc.core=DEBUG
 ```
 Affiche chaque requête SQL exécutée par Spring (création du schéma, insertions, recherches).
+
+## Ingestion
+
+Le pipeline suit le modèle ETL de Spring AI : `DocumentReader` (Extract) → `DocumentTransformer` (Transform) → `DocumentWriter` (Load).
+
+```
+sources/*.pdf
+   │  CommandLineRunner (RagLearningApplication)
+   ▼
+RagIngestorService.ingestPdf()
+   ├─ ParagraphPdfDocumentReader   1 Document par entrée du plan du PDF (section / chapitre)
+   ├─ TokenTextSplitter            redécoupe les sections trop longues (~800 tokens par défaut)
+   └─ VectorStore.add()            appelle Ollama pour chaque chunk, puis insère dans vector_store
+```
+
+| Composant | Rôle | Choix |
+|-----------|------|-------|
+| `ParagraphPdfDocumentReader` | Lit le PDF et produit un `Document` (texte + métadonnées) par entrée du **plan** (*outline* / signets) | Malgré son nom, il découpe par **section** et non par paragraphe : c'est la stratégie « par structure ». Préférable au découpage par page, car une page n'est pas une frontière de sens. |
+| `TokenTextSplitter` | Découpe les `Document` trop longs en chunks | Réglages par défaut (~800 tokens). Une section plus courte reste en un seul chunk. Les tokens sont comptés avec un tokenizer différent de celui de `nomic-embed-text` : c'est une approximation. |
+| `VectorStore` (pgvector) | Vectorise chaque chunk via le modèle d'embedding, puis l'insère | On n'appelle jamais Ollama directement. |
+
+Le bean `TokenTextSplitter` est déclaré dans `BeansConfig` et injecté **avec son type précis** : si plusieurs `DocumentTransformer` coexistent un jour, injecter l'interface rendrait le choix ambigu.
+
+### Prérequis du lecteur par plan
+
+`ParagraphPdfDocumentReader` exige que le PDF ait un **plan** (des signets), ce qui n'est pas la même chose qu'une page « Sommaire » imprimée. Pour vérifier :
+
+- **Aperçu (macOS)** : *Présentation → Table des matières*. Une arborescence de chapitres cliquables = plan présent.
+- **Le lecteur lui-même** lève une exception si le plan est absent ; utiliser alors `PagePdfDocumentReader`.
+- **Par code** : `document.getDocumentCatalog().getDocumentOutline()` (PDFBox) renvoie `null` sans plan.
+
+### ⚠️ Ré-ingestion involontaire
+
+L'ingestion s'exécute **à chaque démarrage**, et donc aussi :
+
+- à **chaque recompilation**, car `spring-boot-devtools` redémarre l'application (`restartedMain` dans les logs) ;
+- à **chaque lancement des tests**, car `@SpringBootTest` exécute les `CommandLineRunner`.
+
+Chaque passage duplique tous les chunks. À rendre désactivable avant de travailler sur la recherche.
 
 ## Le modèle de données
 
@@ -129,7 +176,15 @@ SELECT count(*) FROM vector_store;
 
 -- Taille des vecteurs stockés (doit renvoyer 768)
 SELECT vector_dims(embedding) FROM vector_store LIMIT 1;
+
+-- Détection des doublons : les deux nombres doivent être égaux
+SELECT count(*), count(DISTINCT content) FROM vector_store;
+
+-- Repartir de zéro avant une nouvelle ingestion
+TRUNCATE vector_store;
 ```
+
+Pour voir le SQL exécuté par Spring, activer temporairement `logging.level.org.springframework.jdbc.core=DEBUG`. Les avertissements `already exists, skipping` au démarrage sont normaux : Spring AI rejoue ses `CREATE ... IF NOT EXISTS`.
 
 ## Règles à retenir
 
@@ -138,11 +193,44 @@ SELECT vector_dims(embedding) FROM vector_store LIMIT 1;
 - **`dimensions` suit le modèle**, pas l'inverse.
 - Les vecteurs servent uniquement à **retrouver** ; le LLM ne lit que du **texte**.
 
+## Problèmes connus à l'ingestion
+
+Aucun n'est bloquant (l'ingestion va au bout), mais les deux premiers dégradent la **qualité des chunks**. Un RAG ne retrouve pas ce que l'extraction a abîmé : *garbage in, garbage out*.
+
+| Message | Cause | Conséquence |
+|---------|-------|-------------|
+| `ERROR ForkPDFLayoutTextStripper : Error sorting text positions` / `Comparison method violates its general contract!` | Bug de Spring AI : sa règle de tri des fragments de texte n'est pas cohérente sur certaines mises en page, et le tri Java abandonne. L'exception est rattrapée. | Sur les pages concernées, le texte peut être dans le désordre. |
+| `WARN PDType0Font : No Unicode mapping for CID+... in font CambriaMath` | Les formules mathématiques du PDF sont stockées comme des glyphes sans table de correspondance vers des caractères. | Formules perdues ou caractères illisibles dans le `content`. Aucun réglage de PDFBox ne les récupère. |
+| Beaucoup d'espaces et de sauts de ligne dans le `content` | Le *Layout*TextStripper imite la mise en page visuelle avec des espaces et des retours à la ligne. | Tokens gaspillés (des sections courtes donnent 2 chunks) et sens dilué dans les vecteurs. |
+| `WARNING: A restricted method in java.lang.System has been called` | Netty charge du code natif sans autorisation explicite (Java récent). | Aucune. Option JVM indiquée dans le message pour le faire taire. |
+| `ERROR DnsServerAddressStreamProviders : Unable to load ...MacOSDnsServerAddressStreamProvider` | Résolveur DNS natif macOS de Netty absent du classpath ; repli sur le résolveur par défaut. | Aucune pour des appels à `localhost`. |
+
+**Pistes pour les formules illisibles**, de la plus simple à la plus lourde :
+
+1. Supprimer les caractères irrécupérables (zone d'usage privé Unicode `\p{Co}`, caractère de remplacement `�`) pour qu'ils ne polluent pas les vecteurs.
+2. Ingérer la **source** du PDF (Word, LaTeX, HTML) quand elle existe.
+3. Faire retranscrire les pages concernées par un **modèle multimodal** (image de la page → Markdown + LaTeX), en ne traitant que les pages signalées par les warnings.
+4. Des outils spécialisés d'analyse de documents (souvent en Python).
+
+Les messages PDFBox peuvent être réduits avec `logging.level.org.apache.pdfbox.pdmodel.font=ERROR`.
+
+## Évaluer le RAG
+
+Un RAG peut échouer à deux endroits : il **retrouve les mauvais chunks**, ou il **retrouve les bons mais répond mal**. On les teste séparément, dans l'ordre :
+
+1. **La recherche seule, sans LLM** : `VectorStore.similaritySearch(...)` avec la question et un *top-k*. Pour chaque résultat, afficher le score, la section ou la page d'origine (`metadata`) et le début du texte.
+2. **La génération** : prompt construit à partir des chunks retrouvés et de la question, envoyé à Claude.
+
+**Jeu d'évaluation** : quelques questions sur le PDF dont on connaît la réponse **et la page**, en mélangeant questions précises (une définition) et questions larges. Critère de la recherche : la bonne page apparaît-elle dans le top 5 ? Ce jeu sert à comparer objectivement chaque changement (nettoyage du texte, taille de chunk, lecteur…).
+
 ## Progression
 
 - [x] Infrastructure : PostgreSQL + pgvector via Docker Compose
 - [x] Configuration Spring AI : datasource, Ollama, pgvector, Anthropic
-- [ ] Ingestion : lire un PDF, découper en chunks, stocker les vecteurs
+- [x] Ingestion : lire un PDF, découper en chunks, stocker les vecteurs
+- [ ] Ingestion désactivable (éviter les doublons avec devtools et les tests)
+- [ ] Nettoyage du texte extrait avant découpage
+- [ ] Jeu de questions d'évaluation
 - [ ] Recherche : retrouver les chunks les plus proches d'une question
 - [ ] Génération : construire le prompt et faire répondre Claude
 - [ ] Refactoring en architecture hexagonale
