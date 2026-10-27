@@ -1,6 +1,6 @@
 package fr.elhadi.raglearning.services;
 
-import fr.elhadi.raglearning.models.RagAnswer;
+import fr.elhadi.raglearning.models.RetrievedChunk;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.document.Document;
@@ -13,20 +13,20 @@ import java.util.List;
 @Slf4j
 @Service
 @RequiredArgsConstructor
-public class RagService {
+public class RetrievalService {
 
     private final VectorStore vectorStore;
 
-    public List<RagAnswer> findRelatedChunksTo(final String userRequest) {
+    public List<RetrievedChunk> findRelatedChunksTo(final String userRequest) {
         log.info("Finding related chunks to the user request: {}", userRequest);
         final SearchRequest request = SearchRequest.builder().query(userRequest)
                                                    .topK(5)
                                                    .build();
         final List<Document> documents = vectorStore.similaritySearch(request);
-        return documents.stream().map(document -> RagAnswer.builder()
-                                                            .score(document.getScore())
-                                                            .metadata(document.getMetadata())
-                                                            .content(document.getText())
-                                                            .build()).toList();
+        return documents.stream().map(document -> RetrievedChunk.builder()
+                                                                .score(document.getScore())
+                                                                .metadata(document.getMetadata())
+                                                                .content(document.getText())
+                                                                .build()).toList();
     }
 }

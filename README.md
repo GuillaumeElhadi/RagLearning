@@ -21,7 +21,7 @@ REQUÊTE (à chaque question)
 |------|-------|----------|
 | Modèle d'embedding (« le bibliothécaire ») | Ollama + `nomic-embed-text` | Local, gratuit, léger (~300 Mo) |
 | Base vectorielle | PostgreSQL 18 + extension pgvector | Calcule les distances entre vecteurs |
-| LLM (« l'élève qui répond ») | Anthropic Claude | Rédige la réponse à partir du texte des chunks |
+| LLM (« l'élève qui répond ») | Anthropic Claude Haiku 5.5 | Rédige la réponse à partir du texte des chunks |
 
 Le modèle d'embedding et le LLM sont **indépendants** : Claude ne voit jamais les vecteurs, seulement le texte des chunks retrouvés.
 
@@ -93,6 +93,8 @@ Les PDF à indexer sont placés dans le dossier `sources/` (configurable, voir p
 
 | Propriété | Signification |
 |-----------|---------------|
+| `spring.ai.model.chat=anthropic` | Choisit Anthropic comme fournisseur du modèle de chat |
+| `spring.ai.anthropic.chat.model=claude-haiku-5-5` | Modèle Claude utilisé pour générer les réponses |
 | `spring.ai.anthropic.api-key=${ANTHROPIC_API_KEY}` | Clé lue depuis l'environnement, jamais en dur |
 
 **Application**
@@ -162,6 +164,35 @@ Spring AI crée la table `vector_store`, avec **une ligne par chunk** :
 
 Un index **HNSW** (`vector_cosine_ops`) accélère la recherche des plus proches voisins : il évite de comparer la question à chaque ligne, au prix d'un résultat *approximatif*.
 
+## Recherche et question/réponse
+
+La recherche et la génération sont séparées en deux services :
+
+```
+Question ──► RetrievalService ──► 5 chunks les plus proches
+                                      │
+                                      ├──► /rag/related-chunks : retourne les chunks
+                                      │
+                                      └──► QuestionAnsweringService ──► Claude Haiku ──► réponse
+                                                                           (/rag/ask)
+```
+
+`RetrievalService` utilise la recherche par similarité de pgvector avec `topK=5`. Chaque résultat est exposé sous forme de `RetrievedChunk`, avec son score, ses métadonnées et son texte. `QuestionAnsweringService` fournit à Claude la question et ces chunks comme contexte. Son instruction système lui demande de ne pas inventer de réponse lorsque les ressources RAG ne la contiennent pas. Le client de chat est configuré dans `BeansConfig`; `SimpleLoggerAdvisor` ajoute la journalisation de l'appel au modèle.
+
+Les deux routes attendent la question dans le paramètre `userRequest` :
+
+```bash
+# Inspecter les chunks trouvés sans appeler le LLM
+curl -G --data-urlencode "userRequest=Quelle est la définition de X ?" \
+  http://localhost:8080/rag/related-chunks
+
+# Poser une question au RAG
+curl -G --data-urlencode "userRequest=Quelle est la définition de X ?" \
+  http://localhost:8080/rag/ask
+```
+
+`/rag/related-chunks` renvoie une liste de chunks (`score`, `metadata`, `content`). `/rag/ask` renvoie la réponse générée dans un tableau JSON contenant une chaîne. Il est utile de commencer par la première route pour distinguer un problème de recherche d'un problème de génération.
+
 ## Vérifications utiles
 
 ```sql
@@ -221,7 +252,7 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais chunks**, ou i
 1. **La recherche seule, sans LLM** : `VectorStore.similaritySearch(...)` avec la question et un *top-k*. Pour chaque résultat, afficher le score, la section ou la page d'origine (`metadata`) et le début du texte.
 2. **La génération** : prompt construit à partir des chunks retrouvés et de la question, envoyé à Claude.
 
-**Jeu d'évaluation** : quelques questions sur le PDF dont on connaît la réponse **et la page**, en mélangeant questions précises (une définition) et questions larges. Critère de la recherche : la bonne page apparaît-elle dans le top 5 ? Ce jeu sert à comparer objectivement chaque changement (nettoyage du texte, taille de chunk, lecteur…).
+**Jeu d'évaluation** : quelques questions sur le PDF dont on connaît la réponse **et la page**, en mélangeant questions précises (une définition) et questions larges. Critère de la recherche : la bonne page apparaît-elle dans les cinq chunks retournés par `/rag/related-chunks` ? Pour la génération, vérifier que `/rag/ask` répond à partir du contexte et reconnaît les questions sans réponse dans les ressources. Ce jeu sert à comparer objectivement chaque changement (nettoyage du texte, taille de chunk, lecteur…).
 
 ## Progression
 
@@ -231,7 +262,7 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais chunks**, ou i
 - [ ] Ingestion désactivable (éviter les doublons avec devtools et les tests)
 - [ ] Nettoyage du texte extrait avant découpage
 - [ ] Jeu de questions d'évaluation
-- [ ] Recherche : retrouver les chunks les plus proches d'une question
-- [ ] Génération : construire le prompt et faire répondre Claude
+- [x] Recherche : retrouver les cinq chunks les plus proches d'une question (`/rag/related-chunks`)
+- [x] Génération : fournir la question et les chunks à Claude Haiku (`/rag/ask`)
 - [ ] Refactoring en architecture hexagonale
 - [ ] Comparaison avec l'advisor Spring AI (`QuestionAnswerAdvisor`)
