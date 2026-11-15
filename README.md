@@ -302,6 +302,10 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais chunks**, ou i
 
 **Jeu d'évaluation** : quelques questions sur le PDF dont on connaît la réponse **et la page**, en mélangeant questions précises (une définition) et questions larges. Critère de la recherche : la bonne page apparaît-elle dans les cinq chunks retournés par `/rag/related-chunks` ? Pour la génération, vérifier que `/rag/ask` répond à partir du contexte et reconnaît les questions sans réponse dans les ressources. Ce jeu sert à comparer objectivement chaque changement (nettoyage du texte, taille de chunk, lecteur…).
 
+## Journal d'expérimentation
+
+Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné dans [docs/rag-journal.md](docs/rag-journal.md), avec l'historique des mesures du banc d'évaluation et les points d'attention pour un RAG en production.
+
 ## Progression
 
 - [x] Infrastructure : PostgreSQL + pgvector via Docker Compose
