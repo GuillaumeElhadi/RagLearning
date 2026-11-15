@@ -26,6 +26,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @Component
@@ -84,6 +85,10 @@ public class SlackDocumentReader {
             metadata.put("requestCategory", classification.category().name());
             metadata.put("requestTemplateId", classification.templateId());
             metadata.put("humanReplyCount", humanReplyCount(thread.root().replies()));
+            metadata.put(
+                "responderReplyCount",
+                responderReplyCount(thread.root().replies(), requesterId(thread.root()).orElse(null))
+            );
             if (channelId != null && !channelId.isBlank()) {
                 metadata.put("channelId", channelId);
             }
@@ -209,6 +214,42 @@ public class SlackDocumentReader {
             count += humanReplyCount(reply.replies());
         }
         return count;
+    }
+
+    /**
+     * Nombre de réponses écrites par un humain <b>autre que le demandeur</b>. Un « Thanks » ou
+     * une relance du demandeur seul ne compte pas : le fil n'a reçu aucune réponse de l'équipe.
+     * Si le demandeur est inconnu (formulaire qui le donne en texte brut), toutes les réponses
+     * humaines comptent, comme pour {@link #humanReplyCount}.
+     */
+    private int responderReplyCount(List<SlackMessage> replies, String requesterId) {
+        int count = 0;
+        for (SlackMessage reply : replies == null ? List.<SlackMessage>of() : replies) {
+            final boolean human = reply.botProfile() == null && reply.botId() == null;
+            if (human && (requesterId == null || !requesterId.equals(reply.user()))) {
+                count++;
+            }
+            count += responderReplyCount(reply.replies(), requesterId);
+        }
+        return count;
+    }
+
+    /**
+     * Identifiant Slack du demandeur : l'auteur du message racine s'il est humain, sinon
+     * la personne mentionnée dans le champ {@code Submitted by} du formulaire du bot.
+     */
+    private Optional<String> requesterId(SlackMessage root) {
+        if (root.botProfile() == null && root.botId() == null) {
+            return Optional.ofNullable(root.user());
+        }
+        final String text = root.blocksText() != null && !root.blocksText().isBlank()
+            ? root.blocksText()
+            : root.text();
+        if (text == null) {
+            return Optional.empty();
+        }
+        final Matcher submitter = SUBMITTER_MENTION.matcher(text);
+        return submitter.find() ? Optional.of(submitter.group(1)) : Optional.empty();
     }
 
     /**
