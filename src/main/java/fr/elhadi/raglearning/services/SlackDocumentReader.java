@@ -15,12 +15,13 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
-import java.util.stream.Collectors;
 
 @Component
 @RequiredArgsConstructor
@@ -28,6 +29,7 @@ public class SlackDocumentReader {
 
     private final JsonMapper jsonMapper;
     private final SlackAnonymizer slackAnonymizer;
+    private final SlackRequestClassifier slackRequestClassifier;
 
     public List<Document> read(String slackJsonExtractionPath) throws IOException {
         final SlackExport slackExport;
@@ -46,15 +48,28 @@ public class SlackDocumentReader {
             slackExport.messages() == null ? List.of() : slackExport.messages();
         final List<SlackThread> threads = groupThreads(messages);
         final List<Document> documents = new ArrayList<>(threads.size());
+        final Map<String, Set<String>> seenBotAnswersByTemplate = new HashMap<>();
 
         for (SlackThread thread : threads) {
             final String threadId = thread.threadId();
-            final RawMessage rawMessage = slackAnonymizer.anonymize(thread.root(), threadId);
+            final SlackRequestClassifier.Classification classification =
+                slackRequestClassifier.classify(thread.root());
+            final Set<String> seenAnswers = classification.category()
+                == SlackRequestClassifier.Category.OTHER
+                ? new HashSet<>()
+                : seenBotAnswersByTemplate.computeIfAbsent(
+                    classification.templateId(),
+                    ignored -> new HashSet<>()
+                );
+            final RawMessage rawMessage =
+                slackAnonymizer.anonymize(thread.root(), threadId, seenAnswers);
             final String documentId = documentId(channelIdentity, threadId);
             final Map<String, Object> metadata = new HashMap<>();
             metadata.put("source", "slack");
             metadata.put("threadId", threadId);
             metadata.put("sourceDocumentId", documentId);
+            metadata.put("requestCategory", classification.category().name());
+            metadata.put("requestTemplateId", classification.templateId());
             if (channelId != null && !channelId.isBlank()) {
                 metadata.put("channelId", channelId);
             }
@@ -65,10 +80,12 @@ public class SlackDocumentReader {
                 metadata.put("channel", channelName);
             }
 
-            final String text = rawMessage.author() + ": " + rawMessage.userRequest()
-                + rawMessage.replies().stream()
-                    .map(reply -> "\n" + reply)
-                    .collect(Collectors.joining());
+            final List<String> renderedMessages = new ArrayList<>();
+            if (!("RUNBOY".equals(rawMessage.author()) && rawMessage.userRequest().isBlank())) {
+                renderedMessages.add(rawMessage.author() + ": " + rawMessage.userRequest());
+            }
+            renderedMessages.addAll(rawMessage.replies());
+            final String text = String.join("\n", renderedMessages);
             documents.add(Document.builder()
                 .id(documentId)
                 .metadata(metadata)

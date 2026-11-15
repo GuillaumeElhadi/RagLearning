@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Comparator;
+import java.util.List;
 import java.util.Locale;
 
 @Component
@@ -29,13 +30,26 @@ public class CommandLineIngestor implements CommandLineRunner {
 
     @Override
     public void run(String @NonNull ... args) throws Exception {
+        final List<Path> filesToIngest;
         try (var files = Files.list(Path.of(ragIngestionSourceDir))) {
-            files.filter(Files::isRegularFile)
+/*            files.filter(Files::isRegularFile)
                  .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".pdf"))
                  .sorted(Comparator.naturalOrder())
-                 .forEach(path -> ragIngestorService.ingestPdf(path.toString()));
+                 .forEach(path -> ragIngestorService.ingestPdf(path.toString()));*/
+
+            filesToIngest = files.filter(Files::isRegularFile)
+                .filter(path -> path.getFileName().toString().toLowerCase(Locale.ROOT).endsWith(".json"))
+                .sorted(Comparator.naturalOrder())
+                .toList();
         } catch (IOException exception) {
-            throw new IOException("Unable to read PDF files from the " + ragIngestionSourceDir + " directory", exception);
+            throw new IOException(
+                "Unable to list Slack JSON files from the " + ragIngestionSourceDir + " directory",
+                exception
+            );
+        }
+
+        for (Path file : filesToIngest) {
+            ragIngestorService.ingestSlackHistory(file.toString());
         }
     }
 }
