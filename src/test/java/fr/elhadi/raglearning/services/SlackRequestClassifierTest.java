@@ -67,12 +67,12 @@ class SlackRequestClassifierTest {
     @Test
     void shouldUseBlocksTextWhenNonblankAndFallBackToTextOtherwise() {
         final SlackMessage blocksPreferred = new SlackMessage(
-            null, null, null, null, null, null, null, null,
+            null, null, null, null, null, null, null,
             "Timeout requested", "Access To Other Gateways",
             null, null, null
         );
         final SlackMessage textFallback = new SlackMessage(
-            null, null, null, null, null, null, null, null,
+            null, null, null, null, null, null, null,
             "Switch API Key to OAuth", "  ",
             null, null, null
         );
@@ -144,7 +144,7 @@ class SlackRequestClassifierTest {
 
     private SlackMessage message(String text) {
         return new SlackMessage(
-            null, null, null, null, null, null, null, null, text, null, null, null, null
+            null, null, null, null, null, null, null, text, null, null, null, null
         );
     }
 }

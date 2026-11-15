@@ -6,7 +6,6 @@ import tools.jackson.databind.json.JsonMapper;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNull;
 
 class SlackExportTest {
 
@@ -54,6 +53,5 @@ class SlackExportTest {
         assertEquals("U1", export.members().getFirst().userId());
         assertEquals("message", export.messages().getFirst().blocksText());
         assertEquals("reply", export.messages().getFirst().replies().getFirst().text());
-        assertNull(export.userDirectory().get("U2"));
     }
 }

@@ -5,7 +5,6 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 @JsonIgnoreProperties(ignoreUnknown = true)
 public record SlackMember(
-    @JsonProperty("user_id") String userId,
-    String email
+    @JsonProperty("user_id") String userId
 ) {
 }
