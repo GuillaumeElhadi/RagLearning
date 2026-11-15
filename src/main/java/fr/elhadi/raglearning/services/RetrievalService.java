@@ -16,10 +16,11 @@ import java.util.List;
 public class RetrievalService {
 
     /**
-     * Écarte les fils restés sans réponse humaine : des demandes sans explication ni solution,
-     * qui ressemblent beaucoup aux questions et encombrent le haut du classement.
+     * Écarte les fils restés sans réponse d'une autre personne que le demandeur : des demandes
+     * sans explication ni solution, qui ressemblent beaucoup aux questions et encombrent le haut
+     * du classement. Une simple relance ou un « Thanks » du demandeur ne suffit pas.
      */
-    static final String ANSWERED_THREADS_ONLY = "humanReplyCount > 0";
+    static final String ANSWERED_THREADS_ONLY = "responderReplyCount > 0";
 
     private final VectorStore vectorStore;
 

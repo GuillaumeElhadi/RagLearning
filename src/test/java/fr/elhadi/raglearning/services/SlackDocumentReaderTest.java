@@ -336,6 +336,46 @@ class SlackDocumentReaderTest {
         assertEquals(2, documents.get(1).getMetadata().get("humanReplyCount"));
     }
 
+    @Test
+    void shouldNotCountTheRequesterOwnRepliesAsAnswers() throws Exception {
+        final Path exportPath = tempDir.resolve("requester-replies.json");
+        Files.writeString(exportPath, """
+            {
+              "channel": {"id": "C1"},
+              "messages": [
+                {
+                  "ts": "1",
+                  "user": "U1",
+                  "text": "Can you change the timeout?",
+                  "replies": [{"ts": "1.1", "user": "U1", "text": "Can someone help me?"}]
+                },
+                {
+                  "ts": "2",
+                  "bot_id": "B1",
+                  "text": "*Submitted by* <@U1>\\nTimeout Change for api: orders V1",
+                  "replies": [
+                    {"ts": "2.1", "user": "U1", "text": "Thanks"},
+                    {"ts": "2.2", "user": "U2", "text": "Done, the maximum is 30 seconds"}
+                  ]
+                },
+                {
+                  "ts": "3",
+                  "bot_id": "B1",
+                  "text": "*Submitted by* Jane DOE\\nTimeout Change for api: orders V1",
+                  "replies": [{"ts": "3.1", "user": "U1", "text": "Thanks"}]
+                }
+              ]
+            }
+            """);
+
+        final List<Document> documents = reader.read(exportPath.toString());
+
+        assertEquals(0, documents.get(0).getMetadata().get("responderReplyCount"));
+        assertEquals(1, documents.get(1).getMetadata().get("responderReplyCount"));
+        // Demandeur en texte brut : il ne peut pas être relié à un compte Slack.
+        assertEquals(1, documents.get(2).getMetadata().get("responderReplyCount"));
+    }
+
     private int countOccurrences(String text, String value) {
         return (text.length() - text.replace(value, "").length()) / value.length();
     }
