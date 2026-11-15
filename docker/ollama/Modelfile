@@ -1,0 +1,21 @@
+# Variante de bge-m3 utilisée par l'application (spring.ai.ollama.embedding.model=bge-m3-8k).
+#
+# Création ou mise à jour, depuis la racine du projet :
+#   ollama pull bge-m3
+#   ollama create bge-m3-8k -f docker/ollama/Modelfile
+#
+# Les vecteurs produits sont identiques à ceux de bge-m3 (mêmes poids) :
+# seule la longueur de texte lue change, aucune réingestion n'est nécessaire.
+
+FROM bge-m3
+
+# Taille de contexte : bge-m3 sait lire 8192 tokens, mais Ollama n'en alloue que 2048 par défaut.
+# Spring AI 2.0.2 n'expose aucune propriété pour la changer côté embedding
+# (spring.ai.ollama.embedding.num-ctx est documentée mais n'existe pas dans le code).
+PARAMETER num_ctx 8192
+
+# Ne pas supprimer, même si cela semble redondant avec num_ctx :
+# un modèle d'embedding (type BERT) lit tout le texte en un seul lot de calcul,
+# donc la longueur maximale réelle est min(num_ctx, num_batch).
+# Sans cette ligne, la limite reste à 2048 tokens malgré num_ctx 8192.
+PARAMETER num_batch 8192
