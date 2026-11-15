@@ -37,6 +37,32 @@ public class SlackAnonymizer {
     private static final Pattern JWT =
         Pattern.compile("\\beyJ[A-Za-z0-9_-]+(?:\\.[A-Za-z0-9_-]+){2}\\b");
 
+    /**
+     * Lien Slack : {@code <url>} ou {@code <url|libellé>}. Les références de canal
+     * ({@code <#C123|nom>}), les mentions ({@code <@U123>}) et les commandes
+     * ({@code <!here>}) ne commencent pas par un schéma et ne sont donc pas concernées.
+     */
+    private static final Pattern SLACK_LINK =
+        Pattern.compile("<([a-zA-Z][a-zA-Z0-9+.-]*:[^|>\\s]*)(?:\\|([^>]*))?>");
+
+    /** URL écrite en clair dans le texte, hors syntaxe de lien Slack. */
+    private static final Pattern BARE_URL =
+        Pattern.compile("(?i)\\bhttps?://[^\\s<>|]*[^\\s<>|.,;:!?)]");
+
+    /** Partie chemin d'une URL HTTP, sans hôte, requête ni fragment. */
+    private static final Pattern HTTP_URL_PATH =
+        Pattern.compile("(?i)^https?://[^/?#]+([^?#]*)");
+
+    /**
+     * UUID, y compris préfixé par un type ({@code api-…}, {@code application_…}) : seule la
+     * partie UUID est remplacée, le préfixe est conservé car il porte du sens sans identifier.
+     * Les bornes excluent un caractère hexadécimal plutôt qu'utiliser {@code \b}, qui ne voit
+     * pas de frontière entre {@code _} et un chiffre.
+     */
+    private static final Pattern UUID_PATTERN = Pattern.compile(
+        "(?i)(?<![0-9a-f])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-f])"
+    );
+
     private static final Pattern EMAIL_ADDRESS =
         Pattern.compile("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b");
 
@@ -131,7 +157,12 @@ public class SlackAnonymizer {
     private String sanitizeText(String text, Map<String, String> userAliases) {
         final String withAliases = SLACK_MENTION.matcher(text)
             .replaceAll(match -> userAliases.getOrDefault(match.group(1), "USER UNKNOWN"));
-        final String withAuthorizationRedacted = AUTHORIZATION_HEADER.matcher(withAliases)
+        final String withoutSlackLinks = SLACK_LINK.matcher(withAliases)
+            .replaceAll(match -> Matcher.quoteReplacement(describeLink(match.group(1), match.group(2))));
+        final String withoutBareUrls = BARE_URL.matcher(withoutSlackLinks)
+            .replaceAll(match -> Matcher.quoteReplacement(describeUrl(match.group())));
+        final String withoutUuids = UUID_PATTERN.matcher(withoutBareUrls).replaceAll("[UUID]");
+        final String withAuthorizationRedacted = AUTHORIZATION_HEADER.matcher(withoutUuids)
             .replaceAll("$1[REDACTED]");
         final String withApiKeysRedacted = API_KEY_ASSIGNMENT.matcher(withAuthorizationRedacted)
             .replaceAll("$1[REDACTED]");
@@ -140,6 +171,33 @@ public class SlackAnonymizer {
         final String withoutCredentials = CREDENTIAL_ASSIGNMENT.matcher(withJwtsRedacted)
             .replaceAll("$1=[REDACTED]");
         return EMAIL_ADDRESS.matcher(withoutCredentials).replaceAll("[REDACTED_EMAIL]");
+    }
+
+    /**
+     * Le libellé d'un lien porte son sens ("magnews V1") : on le garde quand il existe.
+     * Sinon, l'URL est réduite à ce qui est utile sans être identifiant.
+     */
+    private String describeLink(String url, String label) {
+        if (label != null && !label.isBlank()) {
+            return label;
+        }
+        return describeUrl(url);
+    }
+
+    /**
+     * Ne garde que le chemin d'une URL HTTP : l'hôte révèle l'infrastructure interne,
+     * et la requête peut contenir des jetons. Les autres schémas (mailto…) sont masqués.
+     */
+    private String describeUrl(String url) {
+        if (url.regionMatches(true, 0, "mailto:", 0, "mailto:".length())) {
+            return "[REDACTED_EMAIL]";
+        }
+        final Matcher httpUrl = HTTP_URL_PATH.matcher(url);
+        if (httpUrl.find()) {
+            final String path = httpUrl.group(1);
+            return path.isEmpty() || "/".equals(path) ? "[URL]" : path;
+        }
+        return "[URL]";
     }
 
     private String alphabeticLabel(int index) {

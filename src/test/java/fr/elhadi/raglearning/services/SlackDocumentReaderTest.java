@@ -142,12 +142,12 @@ class SlackDocumentReaderTest {
             documents.get(1).getMetadata().get("requestTemplateId")
         );
         assertEquals(
-            "USER A: Please change timeout\nAPI: <https://api-a.example|API A>\n"
+            "USER A: Please change timeout\nAPI: API A\n"
                 + "Environment prod\nRUNBOY: Approved",
             documents.get(0).getText()
         );
         assertEquals(
-            "USER A: Please change timeout\nAPI: <https://api-b.example|API B>\n"
+            "USER A: Please change timeout\nAPI: API B\n"
                 + "Environment staging",
             documents.get(1).getText()
         );

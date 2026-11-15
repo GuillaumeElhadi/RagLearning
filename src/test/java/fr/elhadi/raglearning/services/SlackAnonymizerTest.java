@@ -134,6 +134,79 @@ class SlackAnonymizerTest {
         assertEquals(List.of("USER B: nested human follow-up"), anonymized.replies());
     }
 
+    @Test
+    void shouldReplaceSlackLinksByTheirLabelOrTheirPathWithoutHostNorQuery() {
+        final SlackMessage message = message(
+            "U1",
+            "See <https://developer.example.com/manager/api/0a1b2c3d-1111-2222-3333-444455556666/"
+                + "access-restriction?token=abc|magnews V1> and "
+                + "<https://developer.example.com/manager/api/0a1b2c3d-1111-2222-3333-444455556666/"
+                + "access-restriction?token=abc>",
+            null,
+            List.of()
+        );
+
+        final RawMessage anonymized = anonymizer.anonymize(message, "1.1");
+
+        assertEquals(
+            "See magnews V1 and /manager/api/[UUID]/access-restriction",
+            anonymized.userRequest()
+        );
+        assertFalse(anonymized.userRequest().contains("developer.example.com"));
+        assertFalse(anonymized.userRequest().contains("token"));
+    }
+
+    @Test
+    void shouldAnonymizeBareUrlsStandaloneUuidsAndMailtoLinks() {
+        final SlackMessage message = message(
+            "U1",
+            "api 0A1B2C3D-1111-2222-3333-444455556666 at https://host.example.com/path?x=1, "
+                + "home <https://host.example.com/>, contact <mailto:john@example.com|john@example.com>",
+            null,
+            List.of()
+        );
+
+        final RawMessage anonymized = anonymizer.anonymize(message, "1.1");
+
+        assertEquals(
+            "api [UUID] at /path, home [URL], contact [REDACTED_EMAIL]",
+            anonymized.userRequest()
+        );
+    }
+
+    @Test
+    void shouldKeepIdentifierTypePrefixesAndOnlyRedactTheUuidPart() {
+        final SlackMessage message = message(
+            "U1",
+            "Open <https://host.example.com/manager/api/api-0a1b2c3d-1111-2222-3333-444455556666/"
+                + "access-restriction> for application-0a1b2c3d-1111-2222-3333-444455556666 "
+                + "and api_0a1b2c3d-1111-2222-3333-444455556666",
+            null,
+            List.of()
+        );
+
+        final RawMessage anonymized = anonymizer.anonymize(message, "1.1");
+
+        assertEquals(
+            "Open /manager/api/api-[UUID]/access-restriction for application-[UUID] and api_[UUID]",
+            anonymized.userRequest()
+        );
+    }
+
+    @Test
+    void shouldLeaveSlackChannelReferencesAndPlainTextUntouched() {
+        final SlackMessage message = message(
+            "U1",
+            "Ask in <#C123|general> at 10:30, ratio 3:4",
+            null,
+            List.of()
+        );
+
+        final RawMessage anonymized = anonymizer.anonymize(message, "1.1");
+
+        assertEquals("Ask in <#C123|general> at 10:30, ratio 3:4", anonymized.userRequest());
+    }
+
     private SlackMessage message(
         String user,
         String text,
