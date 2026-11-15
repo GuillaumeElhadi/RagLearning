@@ -163,7 +163,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - le nom du champ `Submitted by` des messages du bot est traité comme une identité, et reçoit un alias ; ses autres occurrences dans le fil aussi ;
   - suppression des champs d'e-mail des records d'export (`user_directory`, `members.email`, `user_email`, `creator_email`) : **une donnée qu'on ne charge pas ne peut pas fuir**.
 - **Vérifications** : `content ~ 'Submitted by:? (?!USER )'` → 0 ; recherche des formes « Prénom NOM » restantes : seulement des termes techniques.
-- **Risque résiduel** : un nom cité en texte libre, hors du formulaire (« merci Julie »), n'est pas détecté.
+- **Risque résiduel** : un nom cité en texte libre, hors du formulaire, n'est pas détecté. L'échantillon de [E12](#e12--bruit-résiduel-noms-dhôte-et-réponses-du-demandeur) en a montré deux formes : un prénom dans une salutation (« Hey … »), et un prénom en **signature** à la fin d'un message. Des règles sur les prénoms seuls provoqueraient trop de faux positifs : c'est un vrai sujet de production (détection d'entités nommées, ou relecture humaine avant indexation).
 - **Piège** : `@JsonIgnoreProperties(ignoreUnknown = true)` sur un champ **n'empêche pas** son chargement. Il faut supprimer le champ du record.
 - **Leçons** :
   - vérifier l'anonymisation **sur les données réelles**, pas seulement par des tests unitaires ;
@@ -225,6 +225,47 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - on ne choisit pas une amélioration à l'intuition : on la mesure contre une référence, et on vérifie que les autres questions ne se dégradent pas ;
   - 10 questions est un petit échantillon (une question = 10 points de Hit@10). Ajouter au jeu chaque question réelle mal traitée.
 
+### E12 — Bruit résiduel, noms d'hôte et réponses du demandeur (2026-11-15)
+
+- **Constat** : 383 fils passent le filtre de E9 tout en faisant moins de 300 caractères. Sur un échantillon de 20 :
+
+  | Type | Nombre | Exemples |
+  |---|---|---|
+  | Réponse utile malgré la brièveté | ≈ 7 | timeout maximal de 30 s, pas de mise en veille en UAT, WebSocket non supporté |
+  | Sans contenu exploitable | ≈ 11 | « done », « can you check now? », un simple « Thanks » du demandeur |
+  | Annonces d'exploitation | 2 | migration de Kong 3 |
+
+- **Deux défauts découverts** :
+  - certains fils passaient le filtre uniquement grâce au **demandeur** lui-même (« Thanks », relance) : `humanReplyCount` compte toutes les réponses humaines ;
+  - un **nom d'hôte écrit sans schéma** (`prep-developer.…`) échappait à l'anonymisation, qui n'attrapait que les URL commençant par `http(s)://`.
+- **Changements** :
+  - nouvelle métadonnée `responderReplyCount` : les réponses humaines d'une **autre personne que le demandeur**. Le demandeur est l'auteur du message racine, ou la personne mentionnée dans le `Submitted by` du formulaire. La recherche filtre désormais sur `responderReplyCount > 0` ;
+  - nouvelle règle `[HOST]` pour les noms de domaine sans schéma, limitée aux extensions courantes pour épargner les noms de fichiers (`config.json`) et les paquets Java.
+- **Limite** : quand le formulaire donne le demandeur en texte brut, on ne peut pas le relier à son compte Slack ; toutes les réponses humaines comptent alors.
+- **Une fuite qui a résisté, et sa vraie cause** : après réingestion, un nom d'hôte interne restait en clair, alors que la règle le masquait dans les tests. Dans l'export, une partie du nom était **en gras** : `*ccdp*.priv…`. L'anonymisation ne reconnaissait pas ce texte coupé par les astérisques ; puis le nettoyage de la mise en forme, qui passait **après**, retirait le gras et recomposait le nom d'hôte. Le `TextCleanerTransformer` présentait le même risque, puisqu'il supprimait des caractères après l'anonymisation.
+- **Correction** : le nettoyage (mise en forme, caractères illisibles, espaces) est désormais fait **avant** l'anonymisation, dans `SlackAnonymizer`, et le `TextCleanerTransformer` n'est plus utilisé pour Slack. Ajout d'une règle `[IP]` pour les adresses IPv4 internes, découvertes au passage dans l'export.
+- **Diagnostic, étape par étape** : tester la règle sur le texte stocké (elle le masque) → vérifier que la ligne vient du code actuel (métadonnée récente présente) → afficher les octets (pas de caractère invisible) → chercher le texte **brut** dans l'export, par la phrase qui précède le nom d'hôte (le gras apparaît).
+- **Mesure** :
+  - 136 fils n'avaient reçu de réponses que de leur demandeur : ils sont désormais écartés de la recherche ;
+  - après réingestion, plus aucun nom d'hôte ni aucune adresse IP en clair (contrôles SQL à 0) ;
+  - banc d'évaluation :
+
+    | # | Avant | Après | | # | Avant | Après |
+    |---|---|---|---|---|---|---|
+    | 1 | 1 | 1 | | 6 | 2 | **1** |
+    | 2 | 4 | 4 | | 7 | 4 | **1** |
+    | 3 | 2 | 2 | | 8 | 7 | 7 |
+    | 4 | 1 | 2 | | 9 | 11 | 12 |
+    | 5 | 18 | 18 | | 10 | 23 | 26 |
+
+    Hit@5 et Hit@10 inchangés (60 % et 70 %) ; MRR 0,383 → **0,457**.
+  - **Lecture prudente** : la hausse du MRR vient presque entièrement de deux questions passées au premier rang (6 et 7) ; la question 7 apporte à elle seule +0,075. Sur 10 questions, c'est un signal encourageant, pas une preuve. Les trois échecs (5, 9, 10) n'ont pas bougé : ce lot ne les visait pas, et ils confirment le besoin d'une recherche hybride.
+- **Leçons** :
+  - la longueur n'est pas un critère de qualité : un tiers des fils courts contient les réponses les plus nettes de la base ;
+  - lire des échantillons fait apparaître des fuites que les tests unitaires ne pouvaient pas prévoir.
+  - **l'anonymisation doit être la dernière transformation du texte** : toute étape qui supprime ou réécrit des caractères après elle peut recomposer une donnée sensible ;
+  - pour diagnostiquer une fuite, comparer le texte stocké au texte **brut** de la source : c'est souvent entre les deux que le problème se cache.
+
 ---
 
 ## 3. Historique des mesures
@@ -232,6 +273,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 | Date | Configuration | Hit@5 | Hit@10 | MRR |
 |------|---------------|-------|--------|-----|
 | 2026-11-15 | `bge-m3-8k`, chunk 1500, nettoyage + anonymisation, filtre `humanReplyCount > 0`, top 10 | 60 % | 70 % | 0,383 |
+| 2026-11-15 | + filtre `responderReplyCount > 0`, nettoyage avant anonymisation, `[HOST]` et `[IP]` (E12) | 60 % | 70 % | 0,457 |
 
 ---
 
@@ -243,6 +285,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 - **Tout le texte n'est pas bon à indexer** : sommaires, gabarits, annonces, demandes sans réponse. Les marquer en métadonnée plutôt que les supprimer.
 - **Nettoyer avant de découper**, puisque le découpeur compte des tokens.
 - **Choisir l'unité de document selon le sens** : un fil Slack, une section, un ticket. Pas une page, ni une taille fixe arbitraire.
+- **Anonymiser en dernier** : aucune transformation du texte (nettoyage, normalisation) ne doit avoir lieu après l'anonymisation, sous peine de recomposer une donnée que les règles n'avaient pas reconnue.
 - **Rendre l'ingestion idempotente** : des identifiants stables et un upsert évitent les doublons. Attention aux chunks **orphelins** quand le découpage change : vider la table, ou supprimer les chunks d'un document avant de le réécrire.
 - **Désactiver l'ingestion par défaut** : elle ne doit jamais se déclencher par accident (redémarrage de devtools, tests `@SpringBootTest`, nouveau développeur).
 
