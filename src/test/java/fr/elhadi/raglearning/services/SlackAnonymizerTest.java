@@ -194,6 +194,46 @@ class SlackAnonymizerTest {
     }
 
     @Test
+    void shouldAliasPlainTextSubmitterNamesInBotFormsEverywhereInTheThread() {
+        final SlackMessage reply = message("U1", "FYI Jane DOE, ping jane doe again", null, List.of());
+        final SlackMessage botForm = message(
+            "BOTUSER",
+            "*Submitted by* Jane DOE\n*Description* help",
+            "B1",
+            List.of(reply)
+        );
+
+        final RawMessage anonymized = anonymizer.anonymize(botForm, "1.1");
+
+        assertEquals("*Submitted by* USER A\n*Description* help", anonymized.userRequest());
+        assertEquals(List.of("USER B: FYI USER A, ping USER A again"), anonymized.replies());
+    }
+
+    @Test
+    void shouldAliasSubmitterNamesWrittenAfterAnEmojiOrWithASpacedLabel() {
+        final SlackMessage questionForm = message(
+            "BOTUSER",
+            ":question:Submitted by John SMITH\nYour question: hello",
+            "B1",
+            List.of()
+        );
+        final SlackMessage spacedForm = message("BOTUSER", "*Submitted by * John SMITH", "B1", List.of());
+
+        assertEquals(
+            ":question:Submitted by USER A\nYour question: hello",
+            anonymizer.anonymize(questionForm, "1.1").userRequest()
+        );
+        assertEquals("*Submitted by * USER A", anonymizer.anonymize(spacedForm, "2.1").userRequest());
+    }
+
+    @Test
+    void shouldKeepAliasingSubmittersGivenAsSlackMentions() {
+        final SlackMessage botForm = message("BOTUSER", "*Submitted by* <@U1>", "B1", List.of());
+
+        assertEquals("*Submitted by* USER A", anonymizer.anonymize(botForm, "1.1").userRequest());
+    }
+
+    @Test
     void shouldLeaveSlackChannelReferencesAndPlainTextUntouched() {
         final SlackMessage message = message(
             "U1",
@@ -219,7 +259,6 @@ class SlackAnonymizerTest {
             "1.1",
             null,
             user,
-            null,
             botId,
             null,
             text,

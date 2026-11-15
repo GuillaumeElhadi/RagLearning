@@ -12,7 +12,6 @@ public record SlackMessage(
     String ts,
     @JsonProperty("thread_ts") String threadTs,
     String user,
-    @JsonProperty("user_email") String userEmail,
     @JsonProperty("bot_id") String botId,
     @JsonProperty("bot_profile") BotProfile botProfile,
     String text,

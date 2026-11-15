@@ -21,6 +21,18 @@ public class SlackAnonymizer {
     private static final Pattern SLACK_MENTION =
         Pattern.compile("<@([A-Z0-9]+)(?:\\|[^>]+)?>");
 
+    /**
+     * Demandeur écrit en texte brut dans le formulaire du bot, par exemple
+     * {@code *Submitted by* Prénom NOM} ou {@code :question:Submitted by Prénom NOM}.
+     * Une mention ({@code <@U123>}) est exclue : elle est déjà traitée par {@link #SLACK_MENTION}.
+     */
+    private static final Pattern PLAIN_TEXT_SUBMITTER = Pattern.compile(
+        "(?im)\\bSubmitted by\\b[\\h*:]*([^\\s<*:][^\\n<*]*?)\\h*$"
+    );
+
+    /** Préfixe des clés d'alias qui désignent un nom en texte brut plutôt qu'un identifiant Slack. */
+    private static final String PLAIN_NAME_KEY = "name:";
+
     private static final Pattern CREDENTIAL_ASSIGNMENT = Pattern.compile(
         "(?i)\\b(client[\\s_-]*id|client[\\s_-]*secret|login|password|passwd)\\b[\"']?\\s*"
             + "(?:[:=]\\s*|\\bis\\s+)(?:\"[^\"]*\"|'[^']*'|[^\\s,;]+)"
@@ -101,8 +113,18 @@ public class SlackAnonymizer {
         if (!isBot(message) && message.user() != null) {
             userIds.add(message.user());
         }
+        if (isBot(message)) {
+            collectSubmitterNames(messageText(message), userIds);
+        }
         collectMentionIds(messageText(message), userIds);
         safeMessages(message.replies()).forEach(reply -> collectUserIds(reply, userIds));
+    }
+
+    private void collectSubmitterNames(String text, LinkedHashSet<String> userIds) {
+        final Matcher submitters = PLAIN_TEXT_SUBMITTER.matcher(text);
+        while (submitters.find()) {
+            userIds.add(PLAIN_NAME_KEY + submitters.group(1).strip());
+        }
     }
 
     private void collectMentionIds(String text, LinkedHashSet<String> userIds) {
@@ -155,8 +177,9 @@ public class SlackAnonymizer {
     }
 
     private String sanitizeText(String text, Map<String, String> userAliases) {
-        final String withAliases = SLACK_MENTION.matcher(text)
+        final String withMentionAliases = SLACK_MENTION.matcher(text)
             .replaceAll(match -> userAliases.getOrDefault(match.group(1), "USER UNKNOWN"));
+        final String withAliases = replacePlainNames(withMentionAliases, userAliases);
         final String withoutSlackLinks = SLACK_LINK.matcher(withAliases)
             .replaceAll(match -> Matcher.quoteReplacement(describeLink(match.group(1), match.group(2))));
         final String withoutBareUrls = BARE_URL.matcher(withoutSlackLinks)
@@ -171,6 +194,26 @@ public class SlackAnonymizer {
         final String withoutCredentials = CREDENTIAL_ASSIGNMENT.matcher(withJwtsRedacted)
             .replaceAll("$1=[REDACTED]");
         return EMAIL_ADDRESS.matcher(withoutCredentials).replaceAll("[REDACTED_EMAIL]");
+    }
+
+    /**
+     * Remplace chaque nom repéré dans le formulaire du bot, partout dans le texte du fil,
+     * par l'alias de la personne. Les noms les plus longs sont traités d'abord, pour qu'un
+     * prénom seul ne remplace pas le début d'un nom complet.
+     */
+    private String replacePlainNames(String text, Map<String, String> userAliases) {
+        String result = text;
+        final List<Map.Entry<String, String>> plainNames = userAliases.entrySet().stream()
+            .filter(alias -> alias.getKey().startsWith(PLAIN_NAME_KEY))
+            .sorted((first, second) -> Integer.compare(second.getKey().length(), first.getKey().length()))
+            .toList();
+        for (Map.Entry<String, String> plainName : plainNames) {
+            final String name = plainName.getKey().substring(PLAIN_NAME_KEY.length());
+            result = Pattern.compile("(?i)(?<![\\p{L}\\p{N}])" + Pattern.quote(name) + "(?![\\p{L}\\p{N}])")
+                .matcher(result)
+                .replaceAll(Matcher.quoteReplacement(plainName.getValue()));
+        }
+        return result;
     }
 
     /**

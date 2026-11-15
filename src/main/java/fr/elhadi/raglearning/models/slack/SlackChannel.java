@@ -11,7 +11,6 @@ public record SlackChannel(
     String topic,
     String purpose,
     String creator,
-    @JsonProperty("creator_email") String creatorEmail,
     @JsonProperty("is_private") Boolean isPrivate
 ) {
 }

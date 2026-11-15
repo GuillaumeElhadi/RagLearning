@@ -179,7 +179,6 @@ public class SlackDocumentReader {
             parent.ts(),
             parent.threadTs(),
             parent.user(),
-            parent.userEmail(),
             parent.botId(),
             parent.botProfile(),
             parent.text(),
