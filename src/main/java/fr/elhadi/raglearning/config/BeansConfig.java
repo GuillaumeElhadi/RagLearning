@@ -2,8 +2,10 @@ package fr.elhadi.raglearning.config;
 
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.transformer.splitter.TokenTextSplitter;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.Resource;
 
 @Configuration
 public class BeansConfig {
@@ -15,9 +17,16 @@ public class BeansConfig {
                                 .build();
     }
 
+    /**
+     * Le prompt system vit dans un fichier versionné : plus lisible qu'une chaîne Java,
+     * et modifiable sans toucher au code. Il ne doit pas contenir d'accolades, que le
+     * moteur de modèles interpréterait comme des variables.
+     */
     @Bean
-    ChatClient customChatClient(ChatClient.Builder builder) {
-        return builder.defaultSystem(
-            "You are a helpful assistant. but when you don't find answer in my rag resources, don't imagine answer, tell to user that you don't know").build();
+    ChatClient customChatClient(
+        ChatClient.Builder builder,
+        @Value("classpath:prompts/system-prompt.st") Resource systemPrompt
+    ) {
+        return builder.defaultSystem(systemPrompt).build();
     }
 }
