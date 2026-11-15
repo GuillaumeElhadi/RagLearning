@@ -6,10 +6,12 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -39,14 +41,22 @@ public class SlackAnonymizer {
         Pattern.compile("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b");
 
     public RawMessage anonymize(SlackMessage thread, String threadId) {
+        return anonymize(thread, threadId, new HashSet<>());
+    }
+
+    public RawMessage anonymize(SlackMessage thread, String threadId, Set<String> seenAnswers) {
         Objects.requireNonNull(thread, "thread");
+        Objects.requireNonNull(seenAnswers, "seenAnswers");
         final Map<String, String> userAliases = userAliases(thread);
 
         return RawMessage.builder()
             .threadId(threadId)
             .author(speaker(thread, userAliases))
-            .userRequest(sanitizeText(messageText(thread), userAliases))
-            .replies(replyTexts(thread.replies(), userAliases))
+            .userRequest(sanitizeText(
+                shouldOmitBotText(thread, seenAnswers) ? "" : messageText(thread),
+                userAliases
+            ))
+            .replies(replyTexts(thread.replies(), userAliases, seenAnswers))
             .build();
     }
 
@@ -76,14 +86,28 @@ public class SlackAnonymizer {
         }
     }
 
-    private List<String> replyTexts(List<SlackMessage> replies, Map<String, String> userAliases) {
+    private List<String> replyTexts(
+        List<SlackMessage> replies,
+        Map<String, String> userAliases,
+        Set<String> seenAnswers
+    ) {
         final List<String> replyTexts = new ArrayList<>();
         for (SlackMessage reply : safeMessages(replies)) {
-            replyTexts.add(speaker(reply, userAliases) + ": "
-                + sanitizeText(messageText(reply), userAliases));
-            replyTexts.addAll(replyTexts(reply.replies(), userAliases));
+            if (!shouldOmitBotText(reply, seenAnswers)) {
+                replyTexts.add(speaker(reply, userAliases) + ": "
+                    + sanitizeText(messageText(reply), userAliases));
+            }
+            replyTexts.addAll(replyTexts(reply.replies(), userAliases, seenAnswers));
         }
         return replyTexts;
+    }
+
+    private boolean shouldOmitBotText(SlackMessage message, Set<String> seenAnswers) {
+        if (!isBot(message)) {
+            return false;
+        }
+        final String answer = messageText(message).strip();
+        return answer.isEmpty() || !seenAnswers.add(answer);
     }
 
     private String speaker(SlackMessage message, Map<String, String> userAliases) {
