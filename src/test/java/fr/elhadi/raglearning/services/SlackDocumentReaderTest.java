@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 class SlackDocumentReaderTest {
@@ -20,7 +21,8 @@ class SlackDocumentReaderTest {
     private final SlackDocumentReader reader = new SlackDocumentReader(
         JsonMapper.builder().build(),
         new SlackAnonymizer(),
-        new SlackRequestClassifier()
+        new SlackRequestClassifier(),
+        new SlackMarkupCleaner()
     );
 
     @Test
@@ -240,6 +242,67 @@ class SlackDocumentReaderTest {
 
         assertEquals(2, documents.size());
         assertEquals("USER A: human follow-up", documents.get(1).getText());
+    }
+
+    @Test
+    void shouldAddThreadDateAndYearFromSlackTimestamp() throws Exception {
+        final Path exportPath = tempDir.resolve("dated-thread.json");
+        Files.writeString(exportPath, """
+            {
+              "channel": {"id": "C1"},
+              "messages": [{"ts": "1548947556.013100", "user": "U1", "text": "hello"}]
+            }
+            """);
+
+        final Document document = reader.read(exportPath.toString()).getFirst();
+
+        assertEquals("2019-01-31", document.getMetadata().get("date"));
+        assertEquals(2019, document.getMetadata().get("year"));
+    }
+
+    @Test
+    void shouldOmitDateWhenTimestampIsNotNumeric() throws Exception {
+        final Path exportPath = tempDir.resolve("undated-thread.json");
+        Files.writeString(exportPath, """
+            {
+              "channel": {"id": "C1"},
+              "messages": [{"user": "U1", "text": "no timestamp"}]
+            }
+            """);
+
+        final Document document = reader.read(exportPath.toString()).getFirst();
+
+        assertFalse(document.getMetadata().containsKey("date"));
+        assertFalse(document.getMetadata().containsKey("year"));
+    }
+
+    @Test
+    void shouldCleanBotTemplateMarkupAndDropRepliesLeftEmpty() throws Exception {
+        final Path exportPath = tempDir.resolve("bot-template.json");
+        Files.writeString(exportPath, """
+            {
+              "channel": {"id": "C1"},
+              "messages": [
+                {
+                  "ts": "1",
+                  "bot_id": "B1",
+                  "text": "_tag:devportal_\\n:helmet_with_white_cross: *Submitted by* <@U1>\\n*Environments* UAT\\n*Javascript error*\\n*Description* cannot change access restriction",
+                  "replies": [
+                    {"ts": "1.1", "user": "U2", "text": "Use *public* exposure :smile:"},
+                    {"ts": "1.2", "user": "U1", "text": ":thumbsup:"}
+                  ]
+                }
+              ]
+            }
+            """);
+
+        final Document document = reader.read(exportPath.toString()).getFirst();
+
+        assertEquals(
+            "RUNBOY: Submitted by: USER A\nEnvironments: UAT\n\n"
+                + "Description: cannot change access restriction\nUSER B: Use public exposure",
+            document.getText()
+        );
     }
 
     private int countOccurrences(String text, String value) {

@@ -345,7 +345,8 @@ class RagIngestorServiceTest {
         final SlackDocumentReader slackDocumentReader = new SlackDocumentReader(
             JsonMapper.builder().build(),
             new SlackAnonymizer(),
-            new SlackRequestClassifier()
+            new SlackRequestClassifier(),
+            new SlackMarkupCleaner()
         );
         return new RagIngestorService(
             textSplitter,

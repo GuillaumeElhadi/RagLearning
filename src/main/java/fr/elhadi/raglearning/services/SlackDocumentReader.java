@@ -13,6 +13,9 @@ import tools.jackson.databind.json.JsonMapper;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -20,16 +23,23 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 @Component
 @RequiredArgsConstructor
 public class SlackDocumentReader {
 
+    /** Message réduit à son auteur après nettoyage (emoji seul, pièce jointe…). */
+    private static final Pattern EMPTY_RENDERED_MESSAGE =
+        Pattern.compile("^(?:RUNBOY|USER [A-Z]+|USER UNKNOWN):\\s*$");
+
     private final JsonMapper jsonMapper;
     private final SlackAnonymizer slackAnonymizer;
     private final SlackRequestClassifier slackRequestClassifier;
+    private final SlackMarkupCleaner slackMarkupCleaner;
 
     public List<Document> read(String slackJsonExtractionPath) throws IOException {
         final SlackExport slackExport;
@@ -79,12 +89,20 @@ public class SlackDocumentReader {
             if (channelName != null) {
                 metadata.put("channel", channelName);
             }
+            threadDate(threadId, thread.root().ts()).ifPresent(date -> {
+                metadata.put("date", date.toString());
+                metadata.put("year", date.getYear());
+            });
 
             final List<String> renderedMessages = new ArrayList<>();
-            if (!("RUNBOY".equals(rawMessage.author()) && rawMessage.userRequest().isBlank())) {
-                renderedMessages.add(rawMessage.author() + ": " + rawMessage.userRequest());
+            final String request = slackMarkupCleaner.clean(rawMessage.userRequest()).strip();
+            if (!("RUNBOY".equals(rawMessage.author()) && request.isBlank())) {
+                renderedMessages.add(rawMessage.author() + ": " + request);
             }
-            renderedMessages.addAll(rawMessage.replies());
+            rawMessage.replies().stream()
+                .map(slackMarkupCleaner::clean)
+                .filter(reply -> !EMPTY_RENDERED_MESSAGE.matcher(reply).matches())
+                .forEach(renderedMessages::add);
             final String text = String.join("\n", renderedMessages);
             documents.add(Document.builder()
                 .id(documentId)
@@ -170,6 +188,29 @@ public class SlackDocumentReader {
             parent.reactions(),
             replies
         );
+    }
+
+    /**
+     * Date de début du fil, déduite de son horodatage Slack (secondes epoch, par exemple
+     * {@code 1548947556.013100}). Le threadId est préféré : c'est l'horodatage du premier message.
+     */
+    private Optional<LocalDate> threadDate(String threadId, String rootTimestamp) {
+        return epochDate(threadId).or(() -> epochDate(rootTimestamp));
+    }
+
+    private Optional<LocalDate> epochDate(String slackTimestamp) {
+        if (slackTimestamp == null || slackTimestamp.isBlank()) {
+            return Optional.empty();
+        }
+        final int dot = slackTimestamp.indexOf('.');
+        final String seconds = dot < 0 ? slackTimestamp : slackTimestamp.substring(0, dot);
+        try {
+            return Optional.of(
+                LocalDate.ofInstant(Instant.ofEpochSecond(Long.parseLong(seconds)), ZoneOffset.UTC)
+            );
+        } catch (NumberFormatException exception) {
+            return Optional.empty();
+        }
     }
 
     private String documentId(String channelIdentity, String threadId) {
