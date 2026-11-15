@@ -1,0 +1,65 @@
+[
+  {
+    "question": "Pour une API consommée par une application front publique, faut-il utiliser une API Key ou OAuth ? Comment l'application obtient-elle ses identifiants ?",
+    "expectedThreadIds": [
+      "1678267480.494399"
+    ]
+  },
+  {
+    "question": "J'ai demandé l'activation d'OAuth sur mon API, mais elle bloque. Qu'est-ce qui peut empêcher son activation ?",
+    "expectedThreadIds": [
+      "1679047013.963469"
+    ]
+  },
+  {
+    "question": "Ma demande d'abonnement reste en attente, ou l'API owner ne la voit pas dans son dashboard : qui doit la valider et où retrouver la demande ?",
+    "expectedThreadIds": [
+      "1763386096.015409",
+      "1606142585.286900"
+    ]
+  },
+  {
+    "question": "Le bouton de rotation du token n'est plus disponible et le token a expiré : que faut-il faire ?",
+    "expectedThreadIds": [
+      "1696234832.079459"
+    ]
+  },
+  {
+    "question": "L'URL Swagger fonctionne dans un navigateur, mais le DevPortal reçoit une erreur 401 en récupérant la documentation. Pourquoi ?",
+    "expectedThreadIds": [
+      "1787122434.185679",
+      "1759141275.633129"
+    ]
+  },
+  {
+    "question": "Mon appel API en UAT renvoie 403 : faut-il utiliser à la fois l'API Key et un token Ping, et vérifier une whitelist réseau ?",
+    "expectedThreadIds": [
+      "1788934562.938569"
+    ]
+  },
+  {
+    "question": "Pourquoi Kong renvoie-t-il 502 alors que l'API backend semble disponible ? Comment vérifier si le problème vient du réseau entre Kong et le backend ?",
+    "expectedThreadIds": [
+      "1699461829.156659"
+    ]
+  },
+  {
+    "question": "Quelles plages d'IP sortantes du DevPortal faut-il autoriser dans le firewall, en non-prod ou en prod ?",
+    "expectedThreadIds": [
+      "1718279986.111519",
+      "1777017615.472889"
+    ]
+  },
+  {
+    "question": "Des appels reçoivent une 504 après environ deux secondes : comment vérifier si le timeout de la gateway est en cause ?",
+    "expectedThreadIds": [
+      "1777296608.381479"
+    ]
+  },
+  {
+    "question": "En UAT, le token est signé par Ping PROD alors que le backend attend Ping PREP : comment corriger le fournisseur Ping utilisé ?",
+    "expectedThreadIds": [
+      "1743867575.276269"
+    ]
+  }
+]

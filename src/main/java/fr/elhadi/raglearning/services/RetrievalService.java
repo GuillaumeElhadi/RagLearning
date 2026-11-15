@@ -23,10 +23,21 @@ public class RetrievalService {
 
     private final VectorStore vectorStore;
 
+    /** Nombre de fils transmis au modèle pour répondre à une question. */
+    static final int DEFAULT_TOP_K = 10;
+
     public List<RetrievedChunk> findRelatedChunksTo(final String userRequest) {
-        log.info("Finding related chunks to the user request: {}", userRequest);
+        return findRelatedChunksTo(userRequest, DEFAULT_TOP_K);
+    }
+
+    /**
+     * Variante avec une profondeur de recherche explicite, utile pour l'évaluation : elle
+     * permet de voir à quel rang se trouve un fil, même au-delà de ce qui est transmis au modèle.
+     */
+    public List<RetrievedChunk> findRelatedChunksTo(final String userRequest, final int topK) {
+        log.info("Finding the {} chunks most related to the user request: {}", topK, userRequest);
         final SearchRequest request = SearchRequest.builder().query(userRequest)
-                                                   .topK(10)
+                                                   .topK(topK)
                                                    .filterExpression(ANSWERED_THREADS_ONLY)
                                                    .build();
         final List<Document> documents = vectorStore.similaritySearch(request);
