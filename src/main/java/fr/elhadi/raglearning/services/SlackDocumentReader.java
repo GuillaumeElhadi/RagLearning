@@ -80,6 +80,7 @@ public class SlackDocumentReader {
             metadata.put("sourceDocumentId", documentId);
             metadata.put("requestCategory", classification.category().name());
             metadata.put("requestTemplateId", classification.templateId());
+            metadata.put("humanReplyCount", humanReplyCount(thread.root().replies()));
             if (channelId != null && !channelId.isBlank()) {
                 metadata.put("channelId", channelId);
             }
@@ -187,6 +188,22 @@ public class SlackDocumentReader {
             parent.reactions(),
             replies
         );
+    }
+
+    /**
+     * Nombre de réponses écrites par des humains, à tous les niveaux du fil. Un fil à zéro
+     * est une demande restée sans discussion (souvent un formulaire du bot) : il ne contient
+     * ni explication ni solution, et la recherche peut l'écarter avec un filtre sur cette valeur.
+     */
+    private int humanReplyCount(List<SlackMessage> replies) {
+        int count = 0;
+        for (SlackMessage reply : replies == null ? List.<SlackMessage>of() : replies) {
+            if (reply.botProfile() == null && reply.botId() == null) {
+                count++;
+            }
+            count += humanReplyCount(reply.replies());
+        }
+        return count;
     }
 
     /**

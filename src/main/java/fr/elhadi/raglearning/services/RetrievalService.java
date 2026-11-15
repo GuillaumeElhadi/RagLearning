@@ -15,12 +15,19 @@ import java.util.List;
 @RequiredArgsConstructor
 public class RetrievalService {
 
+    /**
+     * Écarte les fils restés sans réponse humaine : des demandes sans explication ni solution,
+     * qui ressemblent beaucoup aux questions et encombrent le haut du classement.
+     */
+    static final String ANSWERED_THREADS_ONLY = "humanReplyCount > 0";
+
     private final VectorStore vectorStore;
 
     public List<RetrievedChunk> findRelatedChunksTo(final String userRequest) {
         log.info("Finding related chunks to the user request: {}", userRequest);
         final SearchRequest request = SearchRequest.builder().query(userRequest)
-                                                   .topK(5)
+                                                   .topK(10)
+                                                   .filterExpression(ANSWERED_THREADS_ONLY)
                                                    .build();
         final List<Document> documents = vectorStore.similaritySearch(request);
         return documents.stream().map(document -> RetrievedChunk.builder()
