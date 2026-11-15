@@ -13,7 +13,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 
 class SlackAnonymizerTest {
 
-    private final SlackAnonymizer anonymizer = new SlackAnonymizer();
+    private final SlackAnonymizer anonymizer = new SlackAnonymizer(new SlackMarkupCleaner());
 
     @Test
     void shouldRedactAuthorizationApiKeysAndJwtTokens() {
@@ -205,7 +205,7 @@ class SlackAnonymizerTest {
 
         final RawMessage anonymized = anonymizer.anonymize(botForm, "1.1");
 
-        assertEquals("*Submitted by* USER A\n*Description* help", anonymized.userRequest());
+        assertEquals("Submitted by: USER A\nDescription: help", anonymized.userRequest());
         assertEquals(List.of("USER B: FYI USER A, ping USER A again"), anonymized.replies());
     }
 
@@ -223,14 +223,100 @@ class SlackAnonymizerTest {
             ":question:Submitted by USER A\nYour question: hello",
             anonymizer.anonymize(questionForm, "1.1").userRequest()
         );
-        assertEquals("*Submitted by * USER A", anonymizer.anonymize(spacedForm, "2.1").userRequest());
+        assertEquals("Submitted by: USER A", anonymizer.anonymize(spacedForm, "2.1").userRequest());
     }
 
     @Test
     void shouldKeepAliasingSubmittersGivenAsSlackMentions() {
         final SlackMessage botForm = message("BOTUSER", "*Submitted by* <@U1>", "B1", List.of());
 
-        assertEquals("*Submitted by* USER A", anonymizer.anonymize(botForm, "1.1").userRequest());
+        assertEquals("Submitted by: USER A", anonymizer.anonymize(botForm, "1.1").userRequest());
+    }
+
+    @Test
+    void shouldReplaceHostnamesWrittenWithoutSchemeButKeepTheirPath() {
+        final SlackMessage message = message(
+            "U1",
+            "Validate my request on prep-developer.example.fr please, "
+                + "docs at docs.example.com/guide, mail john@example.com",
+            null,
+            List.of()
+        );
+
+        assertEquals(
+            "Validate my request on [HOST] please, docs at [HOST]/guide, mail [REDACTED_EMAIL]",
+            anonymizer.anonymize(message, "1.1").userRequest()
+        );
+    }
+
+    @Test
+    void shouldNotMistakeFileNamesPackagesOrVersionsForHostnames() {
+        final String text = "Edit config.json in org.springframework.boot, version 1.2.3, see README.md";
+        final SlackMessage message = message("U1", text, null, List.of());
+
+        assertEquals(text, anonymizer.anonymize(message, "1.1").userRequest());
+    }
+
+    /**
+     * Compromis assumé : un paquet dont le dernier segment est aussi une extension de domaine
+     * ({@code .ai}, {@code .io}…) ne peut pas être distingué d'un nom d'hôte. En anonymisation,
+     * masquer à tort coûte moins cher que laisser fuiter.
+     */
+    @Test
+    void shouldPreferOverMaskingWhenAPackageNameLooksLikeAHostname() {
+        final SlackMessage message = message("U1", "Upgrade org.springframework.ai", null, List.of());
+
+        assertEquals("Upgrade [HOST]", anonymizer.anonymize(message, "1.1").userRequest());
+    }
+
+    /**
+     * Cas réel : une partie du nom d'hôte était en gras. Sans nettoyage préalable, aucune règle
+     * ne reconnaissait {@code *ccdp*.priv…}, puis le nettoyage révélait le nom d'hôte en clair.
+     */
+    @Test
+    void shouldMaskSensitiveDataSplitByMarkupBecauseCleaningComesFirst() {
+        final SlackMessage message = message(
+            "U1",
+            "Timeouts only for APIs behind *ccdp*.priv.api.example.cloud",
+            null,
+            List.of()
+        );
+
+        assertEquals(
+            "Timeouts only for APIs behind [HOST]",
+            anonymizer.anonymize(message, "1.1").userRequest()
+        );
+    }
+
+    @Test
+    void shouldMaskSensitiveDataSplitByUnreadableCharacters() {
+        final SlackMessage message = message(
+            "U1",
+            "Timeouts only for APIs behind ccdp\uFFFD.priv.api.example.cloud",
+            null,
+            List.of()
+        );
+
+        assertEquals(
+            "Timeouts only for APIs behind [HOST]",
+            anonymizer.anonymize(message, "1.1").userRequest()
+        );
+    }
+
+    @Test
+    void shouldMaskIpv4AddressesAndCidrBlocksButNotVersionNumbers() {
+        final SlackMessage message = message(
+            "U1",
+            "Connected to gateway (10.204.184.79) port 443, open 172.16.0.0/12, "
+                + "upgrade from 1.2.3 to 2.10.4",
+            null,
+            List.of()
+        );
+
+        assertEquals(
+            "Connected to gateway ([IP]) port 443, open [IP], upgrade from 1.2.3 to 2.10.4",
+            anonymizer.anonymize(message, "1.1").userRequest()
+        );
     }
 
     @Test

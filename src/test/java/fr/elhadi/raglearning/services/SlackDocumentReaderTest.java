@@ -20,9 +20,8 @@ class SlackDocumentReaderTest {
 
     private final SlackDocumentReader reader = new SlackDocumentReader(
         JsonMapper.builder().build(),
-        new SlackAnonymizer(),
-        new SlackRequestClassifier(),
-        new SlackMarkupCleaner()
+        new SlackAnonymizer(new SlackMarkupCleaner()),
+        new SlackRequestClassifier()
     );
 
     @Test
