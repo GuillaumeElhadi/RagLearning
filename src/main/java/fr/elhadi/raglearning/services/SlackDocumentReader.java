@@ -36,10 +36,13 @@ public class SlackDocumentReader {
     private static final Pattern EMPTY_RENDERED_MESSAGE =
         Pattern.compile("^(?:RUNBOY|USER [A-Z]+|USER UNKNOWN):\\s*$");
 
+    /** Demandeur d'un formulaire du bot, quand il est donné par une mention : {@code Submitted by <@U123>}. */
+    private static final Pattern SUBMITTER_MENTION =
+        Pattern.compile("(?i)\\bSubmitted by\\b[\\h*:]*<@([A-Z0-9]+)");
+
     private final JsonMapper jsonMapper;
     private final SlackAnonymizer slackAnonymizer;
     private final SlackRequestClassifier slackRequestClassifier;
-    private final SlackMarkupCleaner slackMarkupCleaner;
 
     public List<Document> read(String slackJsonExtractionPath) throws IOException {
         final SlackExport slackExport;
@@ -96,15 +99,17 @@ public class SlackDocumentReader {
             });
 
             final List<String> renderedMessages = new ArrayList<>();
-            final String request = slackMarkupCleaner.clean(rawMessage.userRequest()).strip();
+            final String request = rawMessage.userRequest().strip();
             if (!("RUNBOY".equals(rawMessage.author()) && request.isBlank())) {
                 renderedMessages.add(rawMessage.author() + ": " + request);
             }
             rawMessage.replies().stream()
-                .map(slackMarkupCleaner::clean)
                 .filter(reply -> !EMPTY_RENDERED_MESSAGE.matcher(reply).matches())
                 .forEach(renderedMessages::add);
             final String text = String.join("\n", renderedMessages);
+            if (text.isBlank()) {
+                continue;
+            }
             documents.add(Document.builder()
                 .id(documentId)
                 .metadata(metadata)

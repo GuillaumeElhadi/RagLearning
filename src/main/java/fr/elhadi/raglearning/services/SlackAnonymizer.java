@@ -14,9 +14,20 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 @Component
 public class SlackAnonymizer {
+
+    /**
+     * Adresse IPv4, avec un éventuel masque CIDR ({@code 10.204.184.79}, {@code 172.16.0.0/12}).
+     * Elle révèle la topologie du réseau interne, comme un nom d'hôte. Un numéro de version à
+     * trois segments ({@code 1.2.3}) n'est pas concerné.
+     */
+    private static final Pattern IPV4_ADDRESS = Pattern.compile(
+        "(?<![\\w.])(?:(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1?\\d?\\d)(?:/\\d{1,2})?(?![\\w.])"
+    );
 
     private static final Pattern SLACK_MENTION =
         Pattern.compile("<@([A-Z0-9]+)(?:\\|[^>]+)?>");
@@ -61,6 +72,47 @@ public class SlackAnonymizer {
     private static final Pattern BARE_URL =
         Pattern.compile("(?i)\\bhttps?://[^\\s<>|]*[^\\s<>|.,;:!?)]");
 
+    /** Extensions de domaine publiques. */
+    private static final List<String> PUBLIC_TLDS = List.of(
+        // Génériques
+        "com", "net", "org", "edu", "gov", "info", "pro", "dev", "app", "cloud", "tech",
+        "blog", "cat", "design", "digital", "meet", "post", "solutions", "world", "microsoft", "gle",
+        // Codes pays utilisés comme génériques
+        "io", "ai", "co",
+        // Codes pays
+        "fr", "eu", "be", "es", "it", "pt", "pl", "br", "za", "ag", "ch", "cn", "cy", "dj",
+        "gl", "gr", "hu", "ie", "im", "kz", "mp", "ne", "qa", "ro", "ru", "se", "ua", "vn"
+    );
+
+    /** Suffixes de noms d'hôte propres à l'environnement de l'entreprise. */
+    private static final List<String> INTERNAL_DOMAIN_SUFFIXES = List.of(
+        // Réseau interne, Kubernetes et cloud
+        "local", "internal", "corp", "svc", "cluster", "gcp", "api",
+        // Domaines de l'entreprise et de ses enseignes
+        "adeo", "adeocom", "leroymerlin", "obram", "obramax", "weldom",
+        // Noms de services internes relevés dans les messages
+        "frlm-enki-backend-dev", "scdp-delizone-hmbu-sit",
+        // Fautes de frappe ou noms tronqués relevés dans les messages
+        "comy", "ri", "som"
+    );
+
+    /**
+     * Nom d'hôte écrit sans schéma, par exemple {@code prep-developer.example.fr/docs}.
+     * Seuls les noms se terminant par un suffixe de {@link #PUBLIC_TLDS} ou de
+     * {@link #INTERNAL_DOMAIN_SUFFIXES} sont visés, pour épargner les noms de fichiers
+     * ({@code config.json}). Un paquet Java dont le dernier segment est aussi un suffixe
+     * ({@code org.springframework.ai}) est masqué : masquer à tort coûte moins cher que laisser fuiter.
+     * Le chemin qui suit l'hôte est conservé. Une adresse e-mail n'est pas concernée : son domaine
+     * est précédé d'un {@code @}, et la règle des e-mails la masque ensuite.
+     */
+    private static final Pattern BARE_HOSTNAME = Pattern.compile(
+        "(?i)(?<![\\w.@/-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+(?:"
+            + Stream.concat(PUBLIC_TLDS.stream(), INTERNAL_DOMAIN_SUFFIXES.stream())
+                .map(Pattern::quote)
+                .collect(Collectors.joining("|"))
+            + ")(?![\\w.-])"
+    );
+
     /** Partie chemin d'une URL HTTP, sans hôte, requête ni fragment. */
     private static final Pattern HTTP_URL_PATH =
         Pattern.compile("(?i)^https?://[^/?#]+([^?#]*)");
@@ -77,6 +129,12 @@ public class SlackAnonymizer {
 
     private static final Pattern EMAIL_ADDRESS =
         Pattern.compile("(?i)\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b");
+
+    private final SlackMarkupCleaner markupCleaner;
+
+    public SlackAnonymizer(SlackMarkupCleaner markupCleaner) {
+        this.markupCleaner = Objects.requireNonNull(markupCleaner, "markupCleaner");
+    }
 
     public RawMessage anonymize(SlackMessage thread, String threadId) {
         return anonymize(thread, threadId, new HashSet<>());
@@ -176,15 +234,24 @@ public class SlackAnonymizer {
         return message.text() == null ? "" : message.text();
     }
 
+    /**
+     * Nettoie la mise en forme, <b>puis</b> anonymise. L'ordre est essentiel : une mise en forme
+     * peut couper une donnée sensible ({@code *ccdp*.priv.example.cloud}) au point qu'aucune règle
+     * ne la reconnaisse ; si le nettoyage passait après, il la recomposerait en clair.
+     * L'anonymisation doit donc être la dernière transformation du texte.
+     */
     private String sanitizeText(String text, Map<String, String> userAliases) {
-        final String withMentionAliases = SLACK_MENTION.matcher(text)
+        final String withoutMarkup = markupCleaner.clean(text);
+        final String withMentionAliases = SLACK_MENTION.matcher(withoutMarkup)
             .replaceAll(match -> userAliases.getOrDefault(match.group(1), "USER UNKNOWN"));
         final String withAliases = replacePlainNames(withMentionAliases, userAliases);
         final String withoutSlackLinks = SLACK_LINK.matcher(withAliases)
             .replaceAll(match -> Matcher.quoteReplacement(describeLink(match.group(1), match.group(2))));
         final String withoutBareUrls = BARE_URL.matcher(withoutSlackLinks)
             .replaceAll(match -> Matcher.quoteReplacement(describeUrl(match.group())));
-        final String withoutUuids = UUID_PATTERN.matcher(withoutBareUrls).replaceAll("[UUID]");
+        final String withoutHostnames = BARE_HOSTNAME.matcher(withoutBareUrls).replaceAll("[HOST]");
+        final String withoutIpAddresses = IPV4_ADDRESS.matcher(withoutHostnames).replaceAll("[IP]");
+        final String withoutUuids = UUID_PATTERN.matcher(withoutIpAddresses).replaceAll("[UUID]");
         final String withAuthorizationRedacted = AUTHORIZATION_HEADER.matcher(withoutUuids)
             .replaceAll("$1[REDACTED]");
         final String withApiKeysRedacted = API_KEY_ASSIGNMENT.matcher(withAuthorizationRedacted)

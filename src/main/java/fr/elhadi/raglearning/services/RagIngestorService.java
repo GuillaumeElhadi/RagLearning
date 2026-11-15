@@ -43,9 +43,11 @@ public class RagIngestorService {
     }
 
     public void ingestSlackHistory(final String slackJsonExtractionPath) throws IOException {
+        // Pas de TextCleanerTransformer ici : le texte Slack est déjà nettoyé, puis anonymisé, par
+        // le lecteur. Toute transformation après l'anonymisation risquerait de recomposer une donnée
+        // sensible que les règles n'avaient pas reconnue.
         final List<Document> documents = slackDocumentReader.read(slackJsonExtractionPath);
-        final List<Document> cleanedDocuments = textCleanerTransformer.apply(documents);
-        final List<Document> chunks = stableSlackChunkIds(textSplitter.transform(cleanedDocuments));
+        final List<Document> chunks = stableSlackChunkIds(textSplitter.transform(documents));
         addChunksWithProgress(chunks);
     }
 

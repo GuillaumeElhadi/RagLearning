@@ -11,7 +11,7 @@ class SlackMarkupCleanerTest {
     @Test
     void shouldRemoveWorkspaceTagsAndEmojiShortcodes() {
         assertEquals(
-            "hello   world",
+            "hello world",
             cleaner.clean("_tag:devportal_ hello :smile: :+1::tada: world")
         );
     }
@@ -41,6 +41,14 @@ class SlackMarkupCleanerTest {
         assertEquals(
             "Use public exposure, not 2 * 3",
             cleaner.clean("Use *public* exposure, not 2 * 3")
+        );
+    }
+
+    @Test
+    void shouldRemoveUnreadableCharactersAndNormalizeSpacesAndBlankLines() {
+        assertEquals(
+            "first line\n\nsecond line",
+            cleaner.clean("  first\uE000   line\uFFFD  \n\n\n\nsecond line  ")
         );
     }
 

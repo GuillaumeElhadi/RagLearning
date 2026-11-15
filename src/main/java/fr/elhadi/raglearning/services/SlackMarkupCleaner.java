@@ -6,7 +6,12 @@ import java.util.regex.Pattern;
 
 /**
  * Retire la mise en forme Slack qui n'a pas de sens pour un modèle d'embedding :
- * étiquettes d'espace de travail, codes d'emoji, gras et champs vides du formulaire du bot.
+ * caractères illisibles, étiquettes d'espace de travail, codes d'emoji, gras, champs vides du
+ * formulaire du bot, espaces et lignes vides en trop.
+ * <p>
+ * Il est appelé par {@link SlackAnonymizer} <b>avant</b> l'anonymisation : aucune transformation
+ * du texte ne doit avoir lieu après, sous peine de recomposer une donnée que les règles n'avaient
+ * pas reconnue.
  * <p>
  * Ce gabarit se répète dans des centaines de fils : laissé tel quel, il rapproche
  * les vecteurs de fils sans rapport entre eux et resserre les scores de similarité.
@@ -14,6 +19,13 @@ import java.util.regex.Pattern;
  */
 @Component
 public class SlackMarkupCleaner {
+
+    /**
+     * Caractères illisibles : zone d'usage privé Unicode et caractère de remplacement (U+FFFD).
+     * Retirés en premier : s'ils coupaient une donnée sensible, elle est recomposée ici, avant
+     * l'anonymisation, et non après.
+     */
+    private static final Pattern UNREADABLE_CHARACTERS = Pattern.compile("\\p{Co}|\\uFFFD");
 
     /** Étiquette ajoutée par le bot, par exemple {@code _tag:devportal_}. */
     private static final Pattern WORKSPACE_TAG = Pattern.compile("_tag:[\\w-]+_");
@@ -40,17 +52,25 @@ public class SlackMarkupCleaner {
     private static final Pattern INLINE_BOLD =
         Pattern.compile("(?<![\\w*])\\*([^*\\s][^*\\n]*?)\\*(?![\\w*])");
 
+    private static final Pattern MULTIPLE_SPACES = Pattern.compile("\\h{2,}");
+
     private static final Pattern LINE_EDGE_SPACES = Pattern.compile("(?m)^\\h+|\\h+$");
+
+    /** Plusieurs lignes vides réduites à une seule : la frontière entre paragraphes est conservée. */
+    private static final Pattern MULTIPLE_LINE_BREAKS = Pattern.compile("\\R{2,}");
 
     public String clean(String text) {
         if (text == null || text.isEmpty()) {
             return "";
         }
-        final String withoutTags = WORKSPACE_TAG.matcher(text).replaceAll("");
+        final String readable = UNREADABLE_CHARACTERS.matcher(text).replaceAll("");
+        final String withoutTags = WORKSPACE_TAG.matcher(readable).replaceAll("");
         final String withoutEmojis = EMOJI_SHORTCODE.matcher(withoutTags).replaceAll("");
         final String withoutEmptyFields = EMPTY_FIELD_LINE.matcher(withoutEmojis).replaceAll("");
         final String withPlainLabels = FIELD_LABEL.matcher(withoutEmptyFields).replaceAll("$1$2: ");
         final String withoutBold = INLINE_BOLD.matcher(withPlainLabels).replaceAll("$1");
-        return LINE_EDGE_SPACES.matcher(withoutBold).replaceAll("");
+        final String withSingleSpaces = MULTIPLE_SPACES.matcher(withoutBold).replaceAll(" ");
+        final String withTrimmedLines = LINE_EDGE_SPACES.matcher(withSingleSpaces).replaceAll("");
+        return MULTIPLE_LINE_BREAKS.matcher(withTrimmedLines).replaceAll("\n\n");
     }
 }
