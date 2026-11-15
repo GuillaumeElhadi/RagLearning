@@ -11,6 +11,7 @@ public class BeansConfig {
     @Bean
     public TokenTextSplitter textSplitter() {
         return TokenTextSplitter.builder()
+                                .withChunkSize(1500)
                                 .build();
     }
 

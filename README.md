@@ -19,7 +19,7 @@ REQUÊTE (à chaque question)
 
 | Rôle | Outil | Pourquoi |
 |------|-------|----------|
-| Modèle d'embedding (« le bibliothécaire ») | Ollama + `nomic-embed-text` | Local, gratuit, léger (~300 Mo) |
+| Modèle d'embedding (« le bibliothécaire ») | Ollama + `bge-m3` (variante `bge-m3-8k`) | Local, gratuit, multilingue (français/anglais), textes longs ; ~1,1 Go, vecteurs de 1024 dimensions |
 | Base vectorielle | PostgreSQL 18 + extension pgvector | Calcule les distances entre vecteurs |
 | LLM (« l'élève qui répond ») | Anthropic Claude Haiku 5.5 | Rédige la réponse à partir du texte des chunks |
 
@@ -29,10 +29,13 @@ Le modèle d'embedding et le LLM sont **indépendants** : Claude ne voit jamais 
 
 - **Java 27** et Maven (le wrapper `./mvnw` est fourni)
 - **Docker** (Colima sur Mac) pour PostgreSQL
-- **Ollama** installé et lancé, avec le modèle d'embedding téléchargé :
+- **Ollama** installé et lancé, avec le modèle d'embedding téléchargé **puis** sa variante créée :
   ```bash
-  ollama pull nomic-embed-text
+  ollama pull bge-m3
+  ollama create bge-m3-8k -f docker/ollama/Modelfile
+  ollama show bge-m3-8k --parameters   # doit afficher num_ctx 8192 et num_batch 8192
   ```
+  Voir [Ollama : longueur maximale d'un texte](#ollama--longueur-maximale-dun-texte) pour la raison de cette variante.
 - **Une clé API Anthropic**, exposée dans la variable d'environnement `ANTHROPIC_API_KEY`
   (dans IntelliJ : *Run Configuration → Environment variables*). Ne jamais l'écrire en dur dans un fichier versionné.
 
@@ -46,7 +49,7 @@ docker compose -f docker/compose.yaml up -d
 ./mvnw spring-boot:run
 ```
 
-Au premier démarrage, Spring AI crée lui-même les extensions, la table `vector_store` et son index.
+Au premier démarrage, Spring AI crée lui-même les extensions, la table `devportal_knowledge` et son index.
 
 Les PDF à indexer sont placés dans le dossier `sources/` (configurable, voir plus bas). Au démarrage, l'application **ingère tous les PDF de ce dossier** (voir [Ingestion](#ingestion)).
 
@@ -78,7 +81,8 @@ Les PDF à indexer sont placés dans le dossier `sources/` (configurable, voir p
 | Propriété | Signification |
 |-----------|---------------|
 | `spring.ai.model.embedding=ollama` | Choisit le **fournisseur** d'embedding (et non le modèle) |
-| `spring.ai.ollama.embedding.model=nomic-embed-text` | Choisit le **modèle** Ollama utilisé pour vectoriser |
+| `spring.ai.ollama.embedding.model=bge-m3-8k` | Choisit le **modèle** Ollama utilisé pour vectoriser : `bge-m3` avec un contexte porté à 8192 tokens (voir `docker/ollama/Modelfile`) |
+| `spring.ai.ollama.embedding.truncate=false` | Si un texte dépasse la limite du modèle, Ollama renvoie une **erreur** au lieu de tronquer la fin **en silence**. Un échec visible vaut mieux qu'une perte invisible. |
 
 **Base vectorielle**
 
@@ -86,8 +90,9 @@ Les PDF à indexer sont placés dans le dossier `sources/` (configurable, voir p
 |-----------|---------------|
 | `spring.ai.vectorstore.pgvector.initialize-schema=true` | Autorise Spring AI à créer extensions, table et index au démarrage |
 | `spring.ai.vectorstore.pgvector.schema-name=public` | Schéma PostgreSQL de la table |
+| `spring.ai.vectorstore.pgvector.table-name=devportal_knowledge` | Nom de la table des chunks (par défaut `vector_store`) |
 | `spring.ai.vectorstore.pgvector.distance-type=cosine_distance` | Mesure de proximité entre vecteurs : la distance cosinus, standard pour le texte |
-| `spring.ai.vectorstore.pgvector.dimensions=768` | Taille des vecteurs. **Doit être égale à la dimension du modèle d'embedding** (768 pour `nomic-embed-text`). |
+| `spring.ai.vectorstore.pgvector.dimensions=1024` | Taille des vecteurs. **Doit être égale à la dimension du modèle d'embedding** (1024 pour `bge-m3`, visible avec `ollama show` : *embedding length*). |
 
 **LLM**
 
@@ -102,6 +107,8 @@ Les PDF à indexer sont placés dans le dossier `sources/` (configurable, voir p
 | Propriété | Signification |
 |-----------|---------------|
 | `rag.ingestion.source-dir=sources` | Dossier des PDF à ingérer, relatif au dossier de lancement. Valeur par défaut surchargeable sans toucher au fichier : une variable d'environnement ou un argument de ligne de commande est prioritaire sur `application.properties` (*relaxed binding* : `RAG_INGESTION_SOURCEDIR`, `--rag.ingestion.source-dir=...`). |
+
+⚠️ `initialize-schema` **crée** la table si elle n'existe pas, mais **ne la modifie jamais**. Après un changement de `dimensions` ou de `table-name`, supprimer l'ancienne table (`DROP TABLE ...`) **avant** de redémarrer : dans PostgreSQL, un nom d'index est unique dans tout le schéma, et un ancien index du même nom empêcherait la création de celui de la nouvelle table (`already exists, skipping`). Ne pas utiliser `remove-existing-vector-store-table=true` pour cela : la table serait supprimée **à chaque démarrage**.
 
 ⚠️ Ne pas écrire `rag.ingestion.source-dir=${rag.ingestion.source-dir:sources}` : la propriété se référence elle-même et Spring échoue au démarrage (référence circulaire).
 
@@ -122,15 +129,25 @@ sources/*.pdf
    ▼
 RagIngestorService.ingestPdf()
    ├─ ParagraphPdfDocumentReader   1 Document par entrée du plan du PDF (section / chapitre)
-   ├─ TokenTextSplitter            redécoupe les sections trop longues (~800 tokens par défaut)
-   └─ VectorStore.add()            appelle Ollama pour chaque chunk, puis insère dans vector_store
+   ├─ TokenTextSplitter            redécoupe les documents trop longs (1500 tokens)
+   └─ VectorStore.add()            ajoute les chunks par lots séquentiels de 100
 ```
+
+La barre de progression est affichée par fichier et avance uniquement après la réussite d'un lot. Elle indique donc les chunks dont l'appel au vector store est terminé, pas l'avancement interne d'Ollama ou de PostgreSQL.
+
+### Historique Slack
+
+Les conversations Slack sont indexées comme un document par fil afin de conserver le contexte question/réponse. Une classification déterministe en Java associe chaque fil à une catégorie (`TIMEOUT_CHANGE`, `GATEWAY_ACCESS`, `API_KEY_OAUTH`, `RUN_ISSUE`, `APPROVAL_VALIDATION` ou `OTHER`) et à un identifiant de modèle calculé à partir du texte normalisé. Le texte original des demandes est conservé, notamment les détails propres à chaque API, application et environnement.
+
+Pour un même modèle autre que `OTHER`, une seule réponse de bot au texte exactement identique est conservée dans le canal ; les fils `OTHER` ne sont pas dédupliqués entre eux, et les réponses seulement similaires ne sont pas fusionnées. Les auteurs deviennent `USER A`, `USER B`, etc. (alias déterministes dans l'export), et les messages de bot sont étiquetés `RUNBOY`. Les mentions Slack sont converties en alias ; les affectations `clientID`, `client secret`, `login`, `password` et les adresses e-mail sont masquées avant l'envoi au vector store.
+
+Cette anonymisation ne peut pas reconnaître les noms de personnes ou les secrets écrits en texte libre sans marqueur explicite. Pour un export partagé ou une ingestion en production, il faut aussi contrôler les données à la source et vérifier les textes nettoyés avant indexation.
 
 | Composant | Rôle | Choix |
 |-----------|------|-------|
 | `ParagraphPdfDocumentReader` | Lit le PDF et produit un `Document` (texte + métadonnées) par entrée du **plan** (*outline* / signets) | Malgré son nom, il découpe par **section** et non par paragraphe : c'est la stratégie « par structure ». Préférable au découpage par page, car une page n'est pas une frontière de sens. |
-| `TokenTextSplitter` | Découpe les `Document` trop longs en chunks | Réglages par défaut (~800 tokens). Une section plus courte reste en un seul chunk. Les tokens sont comptés avec un tokenizer différent de celui de `nomic-embed-text` : c'est une approximation. |
-| `VectorStore` (pgvector) | Vectorise chaque chunk via le modèle d'embedding, puis l'insère | On n'appelle jamais Ollama directement. |
+| `TokenTextSplitter` | Découpe les `Document` trop longs en chunks | `chunkSize` de 1500 tokens (800 par défaut). Un document plus court reste en un seul chunk : avec cette valeur, environ 99 % des fils Slack restent entiers, ce qui garde ensemble la question et sa résolution. Les tokens sont comptés avec un tokenizer différent de celui de `bge-m3` : c'est une approximation, d'où la marge par rapport à la limite de 8192. |
+| `VectorStore` (pgvector) | Vectorise chaque chunk via le modèle d'embedding, puis l'insère par lots de 100 | On n'appelle jamais Ollama directement. |
 
 Le bean `TokenTextSplitter` est déclaré dans `BeansConfig` et injecté **avec son type précis** : si plusieurs `DocumentTransformer` coexistent un jour, injecter l'interface rendrait le choix ambigu.
 
@@ -153,16 +170,41 @@ Chaque passage duplique tous les chunks. À rendre désactivable avant de travai
 
 ## Le modèle de données
 
-Spring AI crée la table `vector_store`, avec **une ligne par chunk** :
+Spring AI crée la table `devportal_knowledge`, avec **une ligne par chunk** :
 
 | Colonne | Contenu |
 |---------|---------|
 | `id` | Identifiant du chunk (UUID, via l'extension `uuid-ossp`) |
 | `content` | Le **texte** du chunk. Indispensable : un vecteur ne se « décompresse » pas, et c'est ce texte qui est envoyé au LLM. |
-| `metadata` | JSON libre : fichier source, numéro de page… |
-| `embedding` | Le vecteur du chunk, `vector(768)` : ses coordonnées sur la « carte du sens » |
+| `metadata` | JSON libre : fichier source et page pour un PDF ; `source`, `channel`, `threadId`, `sourceDocumentId` pour un fil Slack |
+| `embedding` | Le vecteur du chunk, `vector(1024)` : ses coordonnées sur la « carte du sens » |
 
-Un index **HNSW** (`vector_cosine_ops`) accélère la recherche des plus proches voisins : il évite de comparer la question à chaque ligne, au prix d'un résultat *approximatif*.
+Un index **HNSW** (`vector_cosine_ops`) accélère la recherche des plus proches voisins : il évite de comparer la question à chaque ligne, au prix d'un résultat *approximatif*. Vérifier sa présence avec `\d devportal_knowledge`.
+
+## Ollama : longueur maximale d'un texte
+
+Par défaut, Ollama n'alloue que **2048 tokens** de contexte, même pour un modèle capable d'en lire 8192 comme `bge-m3`. Au-delà, la fin du texte est **ignorée sans erreur**. D'où la variante `bge-m3-8k`, définie dans `docker/ollama/Modelfile` :
+
+```
+FROM bge-m3
+PARAMETER num_ctx 8192
+PARAMETER num_batch 8192
+```
+
+- **`num_ctx` seul ne suffit pas.** Un modèle d'embedding (type BERT) lit tout le texte **en un seul lot de calcul**, contrairement à un LLM qui peut lire un long prompt par morceaux. La longueur maximale réelle est donc **min(`num_ctx`, `num_batch`)**.
+- **Spring AI 2.0.2 ne permet pas de régler ces valeurs pour l'embedding.** La propriété `spring.ai.ollama.embedding.num-ctx` figure dans la documentation, mais n'existe pas dans le code : seules `model`, `truncate` et `keep-alive` sont liées. Une propriété inconnue est ignorée sans avertissement.
+- **Les vecteurs de `bge-m3-8k` sont identiques à ceux de `bge-m3`** : mêmes poids, seule la quantité de texte lue change.
+
+**Vérifier la limite effective** : l'API d'Ollama renvoie le nombre de tokens réellement traités (`prompt_eval_count`). Avec un texte d'environ 9000 tokens, il doit valoir 8192 :
+
+```bash
+curl -s http://localhost:11434/api/embed -d "{
+  \"model\": \"bge-m3-8k\",
+  \"input\": \"$(python3 -c 'print("test de contexte " * 3000)')\"
+}" | python3 -c 'import json,sys; print(json.load(sys.stdin)["prompt_eval_count"])'
+```
+
+2048 signifie que la variante n'est pas utilisée ou que `num_batch` manque. Pendant une ingestion, `ollama ps` affiche aussi le contexte du modèle chargé.
 
 ## Recherche et question/réponse
 
@@ -203,16 +245,19 @@ SELECT extname FROM pg_extension;
 SELECT '[1,2,3]'::vector <-> '[1,2,4]'::vector;
 
 -- Nombre de chunks indexés
-SELECT count(*) FROM vector_store;
+SELECT count(*) FROM devportal_knowledge;
 
--- Taille des vecteurs stockés (doit renvoyer 768)
-SELECT vector_dims(embedding) FROM vector_store LIMIT 1;
+-- Taille des vecteurs stockés (doit renvoyer 1024)
+SELECT vector_dims(embedding) FROM devportal_knowledge LIMIT 1;
 
 -- Détection des doublons : les deux nombres doivent être égaux
-SELECT count(*), count(DISTINCT content) FROM vector_store;
+SELECT count(*), count(DISTINCT content) FROM devportal_knowledge;
+
+-- Structure de la table et présence de l'index HNSW (psql)
+\d devportal_knowledge
 
 -- Repartir de zéro avant une nouvelle ingestion
-TRUNCATE vector_store;
+TRUNCATE devportal_knowledge;
 ```
 
 Pour voir le SQL exécuté par Spring, activer temporairement `logging.level.org.springframework.jdbc.core=DEBUG`. Les avertissements `already exists, skipping` au démarrage sont normaux : Spring AI rejoue ses `CREATE ... IF NOT EXISTS`.
@@ -223,6 +268,9 @@ Pour voir le SQL exécuté par Spring, activer temporairement `logging.level.org
 - **Changer de modèle d'embedding = tout ré-indexer.** Les PDF sources restent la source de vérité, les vecteurs sont un dérivé jetable.
 - **`dimensions` suit le modèle**, pas l'inverse.
 - Les vecteurs servent uniquement à **retrouver** ; le LLM ne lit que du **texte**.
+- **Sous Ollama, la longueur maximale d'un texte à vectoriser est min(`num_ctx`, `num_batch`)**, 2048 par défaut. Toujours vérifier la limite effective plutôt que celle annoncée par le modèle.
+- **Préférer un échec bruyant à une perte silencieuse** : `truncate=false` plutôt qu'une troncature invisible.
+- **La référence pour les propriétés d'une bibliothèque Spring est son catalogue** (`META-INF/spring-configuration-metadata.json` dans le JAR, celui qu'utilise l'autocomplétion d'IntelliJ), pas la documentation : une propriété documentée mais absente du catalogue peut être ignorée sans avertissement.
 
 ## Problèmes connus à l'ingestion
 
