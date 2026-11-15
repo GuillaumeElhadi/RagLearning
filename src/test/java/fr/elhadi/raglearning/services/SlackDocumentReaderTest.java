@@ -305,6 +305,38 @@ class SlackDocumentReaderTest {
         );
     }
 
+    @Test
+    void shouldCountOnlyHumanRepliesAtEveryLevelOfTheThread() throws Exception {
+        final Path exportPath = tempDir.resolve("reply-counts.json");
+        Files.writeString(exportPath, """
+            {
+              "channel": {"id": "C1"},
+              "messages": [
+                {"ts": "1", "bot_id": "B1", "text": "Timeout Change for api: orders V1"},
+                {
+                  "ts": "2",
+                  "bot_id": "B1",
+                  "text": "Update Access Policy for api: catalog V1",
+                  "replies": [
+                    {"ts": "2.1", "bot_id": "B1", "text": "Request received"},
+                    {
+                      "ts": "2.2",
+                      "user": "U1",
+                      "text": "No need to change the visibility",
+                      "replies": [{"ts": "2.3", "user": "U2", "text": "ok, thanks"}]
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+
+        final List<Document> documents = reader.read(exportPath.toString());
+
+        assertEquals(0, documents.get(0).getMetadata().get("humanReplyCount"));
+        assertEquals(2, documents.get(1).getMetadata().get("humanReplyCount"));
+    }
+
     private int countOccurrences(String text, String value) {
         return (text.length() - text.replace(value, "").length()) / value.length();
     }
