@@ -266,6 +266,48 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - **l'anonymisation doit être la dernière transformation du texte** : toute étape qui supprime ou réécrit des caractères après elle peut recomposer une donnée sensible ;
   - pour diagnostiquer une fuite, comparer le texte stocké au texte **brut** de la source : c'est souvent entre les deux que le problème se cache.
 
+### E13 — Recherche par mots-clés : une hypothèse réfutée (2026-11-15)
+
+- **Constat** : les questions 5, 9 et 10 restent mal classées (rangs 18, 12 et 26). On supposait qu'elles reposaient sur des **termes exacts** (`401`, `504`, `prep`, `prod`) que les embeddings saisissent mal.
+- **Hypothèse** : une **seconde recherche, indépendante**, par mots-clés (plein texte PostgreSQL), fusionnée avec la recherche vectorielle par *Reciprocal Rank Fusion* (score = Σ 1/(60 + rang)), ferait remonter les références. Avant de coder la fusion, on a mesuré en SQL ce que la recherche par mots-clés **seule** donnait pour ces trois questions.
+- **Outils d'exploration** :
+  - `to_tsvector('simple', content)` / `to_tsquery` / `@@` : `'simple'` ne fait ni racinisation ni suppression de mots vides, adapté à un corpus mêlant français et anglais. Le ET (`&`) est précis mais fragile, le OU (`|`) a besoin d'un bon score ;
+  - `ts_rank_cd` ne connaît pas l'IDF et favorise les documents longs. On a donc calculé un score maison : la **somme des IDF** des mots trouvés, avec IDF = ln(nombre de chunks / nombre de chunks contenant le mot), obtenu via `ts_stat` ;
+  - le rang exact d'une référence se calcule avec des fonctions de fenêtre : `rank() OVER (ORDER BY score DESC)` (rang optimiste) et `count(*) OVER () - rank() OVER (ORDER BY score ASC) + 1` (rang pessimiste). L'écart entre les deux est la taille du groupe d'ex aequo ;
+  - pièges SQL : l'opérateur `?` n'existe pas sur `json` (et JDBC le prend pour un paramètre), `GROUP BY` sur une colonne `json` échoue (grouper par `d.id`).
+- **Trois façons de choisir les mots** :
+  1. **Les mots de la question, pondérés par l'IDF** : les mots-outils français (`quand`, `faut-il`) sont rares dans un canal surtout anglophone, donc jugés précieux, alors que les termes techniques sont fréquents, donc jugés banals. Les fils en français sans rapport remontaient. **L'IDF mesure la rareté, pas la pertinence.**
+  2. **Des mots choisis à la main, en anglais** : question 5 au rang 13 (mieux que la recherche dense), question 9 au rang 18 (16 fils ex aequo), question 10 hors du top 10.
+  3. **Des mots extraits par un LLM** (prompt `prompts/keyword-extraction.st`, exploré avec `KeywordExtractionExplorationTest`) : traduction en anglais, codes conservés, synonymes proches ajoutés.
+- **Comportement du LLM** :
+  - bien : tout en anglais, termes exacts conservés, synonymes justes sur le fond (`unauthorized`, `upstream`, `issuer`) ;
+  - défauts : mots composés malgré la consigne (`api-key`, `gateway-timeout`, que PostgreSQL découpe en morceaux tous obligatoires) ; mots qui tombent sur les masques d'anonymisation (`ip`, `host`, `uuid` correspondent à `[IP]`, `[HOST]`, `[UUID]`) ; pas de `jwt` pour la question 10 (l'ajouter au prompt aurait été du sur-apprentissage sur le jeu d'évaluation).
+- **Mesure** (rang de la meilleure référence, recherche par mots-clés seule, avec OU) :
+
+  | Question | Dense | Mots à la main | Mots du LLM | Fils trouvés (LLM) |
+  |---|---|---|---|---|
+  | 5 | 18 | 13 | 42 à 48 | 651 |
+  | 9 | 12 | 18 | 132 à 144 | 1 622 |
+  | 10 | 26 | hors top 10 | 219 à 234 | 2 451 |
+
+  Aucun code de production modifié : les mesures du banc sont inchangées.
+- **Pourquoi ça échoue** :
+  - **nos termes ne sont pas rares** : dans un canal de support d'une passerelle d'API, `401`, `504`, `kong`, `prod`, `token` apparaissent dans des centaines de fils. Un mot présent partout ne distingue pas un fil d'un autre, même quand c'est le bon mot ;
+  - **les références sont laconiques** : `401 authentication`, `504 timeout`, `ping prep prod`. Elles n'emploient ni `unauthorized`, ni `openapi`, ni `upstream`, ni `gateway`. Les noms d'hôtes contenant `prod` ou `prep` ont été masqués en `[HOST]` ;
+  - **les synonymes aident les concurrents** : chaque mot ajouté est un mot de plus que les **autres** fils peuvent posséder. Ils gonflent aussi un concept : `swagger`, `spec` et `openapi` font passer devant n'importe quel fil sur les specs Swagger, sans aucun 401 ;
+  - **le score est trop pauvre** : la somme d'IDF ignore la fréquence du mot dans le fil et sa longueur. Résultat : des groupes de 12 à 24 fils ex aequo.
+- **Décision** : ne pas coder la fusion RRF pour l'instant. Elle récompense l'accord entre les deux recherches : avec des rangs mots-clés aussi mauvais, elle ferait redescendre ces références plutôt que les remonter.
+- **Indice pour la suite** : les trois références sont **dans le top 30 dense**. La recherche dense les trouve mais les classe mal. Le problème est l'**ordre**, pas la découverte : c'est le rôle du **reranking**.
+- **Pistes non testées** : grouper les mots par concept, avec un OU dans le concept et un ET entre concepts (`(401 | unauthorized) & (swagger | openapi | spec)`), le LLM renvoyant des groupes ; pondérer les mots d'origine plus que les synonymes ; un vrai BM25 (extension ParadeDB `pg_search`).
+- **Leçons** :
+  - **mesurer une hypothèse avant de coder** : quelques requêtes SQL ont évité un service de fusion qui n'aurait rien amélioré ;
+  - la recherche par mots-clés brille sur les **termes rares** (identifiant, nom d'application, code d'erreur peu fréquent), pas sur le vocabulaire quotidien du domaine ;
+  - **l'expansion de requête échange de la précision contre du rappel** : elle aide quand la référence emploie le synonyme, et nuit dans tous les autres cas ;
+  - pour un corpus mixte, la vraie valeur du LLM est la **traduction**, pas les synonymes ;
+  - le scoring compte autant que le choix des mots ;
+  - une recherche secondaire se juge à **ce qu'elle apporte à la fusion** : seulement sur les questions où elle classe la référence mieux que la recherche dense ;
+  - **le jeu d'évaluation doit contenir des questions qui ont besoin de la technique testée** : le nôtre n'a aucune question à terme rare.
+
 ---
 
 ## 3. Historique des mesures
@@ -274,6 +316,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 |------|---------------|-------|--------|-----|
 | 2026-11-15 | `bge-m3-8k`, chunk 1500, nettoyage + anonymisation, filtre `humanReplyCount > 0`, top 10 | 60 % | 70 % | 0,383 |
 | 2026-11-15 | + filtre `responderReplyCount > 0`, nettoyage avant anonymisation, `[HOST]` et `[IP]` (E12) | 60 % | 70 % | 0,457 |
+| 2026-11-15 | inchangé : recherche par mots-clés explorée en SQL, non intégrée (E13) | 60 % | 70 % | 0,457 |
 
 ---
 
@@ -311,7 +354,9 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 - **Lire les scores en relatif** : ils dépendent du modèle, et ne sont pas des pourcentages de pertinence.
 - **Un seuil de similarité filtre, il ne reclasse pas.** Il sert surtout à ne rien renvoyer pour une question hors sujet, et se calibre pour chaque modèle.
 - **Augmenter le top-k est un outil d'analyse**, pas une solution à un problème de classement.
-- **Les embeddings sont faibles sur les termes exacts** (codes d'erreur, noms d'environnement, numéros de version) : la recherche hybride (vecteurs + mots-clés) est le remède classique.
+- **Les embeddings sont faibles sur les termes exacts et rares** (identifiants, noms d'application, codes d'erreur peu fréquents) : la recherche hybride (vecteurs + mots-clés) est le remède classique. Elle n'aide pas quand les termes sont du vocabulaire courant du domaine (E13).
+- **Vérifier si la référence est trouvée mais mal classée** (top 30) ou pas trouvée du tout : le premier cas relève du reranking, le second de la recherche.
+- **Se méfier de l'expansion de requête par synonymes** : chaque mot ajouté peut faire passer des documents concurrents devant.
 
 ### Génération et prompt system
 
@@ -335,14 +380,16 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 
 Par ordre de priorité, chacune à mesurer contre la référence de la section 3 :
 
-1. **Recherche hybride** : ajouter la recherche plein texte de PostgreSQL (`tsvector`) et fusionner les classements (*Reciprocal Rank Fusion*). Cible : les questions 5, 9 et 10, qui reposent sur des termes exacts.
-2. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI) avant la recherche. Cible : le décalage de vocabulaire (E7).
-3. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
-4. **Reranking** : récupérer 30 candidats, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble.
+1. **Reranking** (E14) : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
+2. **Recherche hybride** : à reprendre seulement après avoir ajouté au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
+3. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI) avant la recherche. Cible : le décalage de vocabulaire (E7). Attention à l'effet observé en E13 avec les synonymes.
+4. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
 5. **Ajuster la consigne sur les dates** (E10).
 6. **Calibrer un seuil de similarité** pour les questions hors sujet, avec `bge-m3`.
 7. **Évaluer la génération**, et pas seulement la recherche : fidélité au contexte, sources correctes, par exemple avec un LLM juge.
 8. **Industrialiser** : tests d'intégration autonomes (Testcontainers), schéma géré par Liquibase, refactoring en architecture hexagonale.
+9. **Anonymisation plus fine** : garder une partie utile et non sensible des valeurs masquées (`[HOST:prep]`, `[HOST:prod]`), pour ne pas perdre l'environnement concerné (E13).
+10. **Nettoyage** : un emoji collé à un mot (`:question:Submitted`) n'est pas retiré.
 
 ---
 
@@ -355,6 +402,9 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 | **Top-k** | Nombre de chunks les plus proches renvoyés par la recherche. |
 | **Score de similarité** | Proximité entre la question et un chunk (ici 1 − distance cosinus). Relatif au modèle. |
 | **Recherche hybride** | Combinaison de la recherche vectorielle (sens) et de la recherche par mots-clés (termes exacts). |
+| **IDF** | *Inverse Document Frequency* : ln(nombre de documents / nombre de documents contenant le mot). Mesure la rareté d'un mot, pas sa pertinence. |
+| **BM25** | Score de recherche par mots-clés qui combine IDF, fréquence du mot (avec saturation) et normalisation par la longueur du document. |
+| **RRF** | *Reciprocal Rank Fusion* : fusion de classements par la somme de 1/(60 + rang). Utilise les rangs, car les scores de deux recherches ne sont pas comparables. |
 | **Reranking** | Second classement des candidats par un modèle qui lit la question et chaque document ensemble. |
 | **Hit@k** | Part des questions dont un document de référence est dans les k premiers résultats. |
 | **MRR** | *Mean Reciprocal Rank* : moyenne de 1/rang du premier document de référence. |
