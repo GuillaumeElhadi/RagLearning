@@ -8,10 +8,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.core.io.Resource;
-import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
-import java.io.InputStream;
+import java.util.List;
 import java.util.Objects;
 import java.util.stream.Collectors;
 
@@ -34,15 +33,16 @@ class KeywordExtractionExplorationTest {
     @Test
     void printExtractedKeywords() throws IOException {
         final ChatClient chatClient = chatClientBuilder.defaultSystem(keywordExtractionPrompt).build();
-        final RetrievalEvaluationTest.EvaluationCase[] cases = loadCases();
+        final List<RetrievalEvaluationTest.EvaluationCase> cases = RetrievalEvaluationTest.loadCases();
 
         System.out.println("\n=== Mots-clés extraits ===");
-        for (int index = 0; index < cases.length; index++) {
+        for (int index = 0; index < cases.size(); index++) {
+            final String question = cases.get(index).label();
             final ChatResponse response = chatClient.prompt()
-                .user(cases[index].question())
+                .user(question)
                 .call()
                 .chatResponse();
-            System.out.printf("%n#%d %s%n   -> %s%n", index + 1, cases[index].question(), text(response));
+            System.out.printf("%n#%d %s%n   -> %s%n", index + 1, question, text(response));
         }
     }
 
@@ -53,14 +53,5 @@ class KeywordExtractionExplorationTest {
             .filter(Objects::nonNull)
             .filter(text -> !text.isBlank())
             .collect(Collectors.joining(" "));
-    }
-
-    private RetrievalEvaluationTest.EvaluationCase[] loadCases() throws IOException {
-        try (InputStream input = getClass().getResourceAsStream("/evaluation/retrieval-questions.json")) {
-            if (input == null) {
-                throw new IOException("Jeu d'évaluation introuvable : /evaluation/retrieval-questions.json");
-            }
-            return JsonMapper.builder().build().readValue(input, RetrievalEvaluationTest.EvaluationCase[].class);
-        }
     }
 }

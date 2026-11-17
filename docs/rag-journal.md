@@ -308,6 +308,42 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - une recherche secondaire se juge à **ce qu'elle apporte à la fusion** : seulement sur les questions où elle classe la référence mieux que la recherche dense ;
   - **le jeu d'évaluation doit contenir des questions qui ont besoin de la technique testée** : le nôtre n'a aucune question à terme rare.
 
+### E14 — La même question en français et en anglais (2026-11-17)
+
+- **Constat** : les questions du jeu sont en français, alors que les fils sont surtout en anglais. `bge-m3` est multilingue, mais une recherche d'une langue à l'autre est en général un peu moins précise qu'une recherche dans la même langue.
+- **Hypothèse** : une partie des mauvais classements vient de la **langue** de la question. Si c'est le cas, traduire la question avant la recherche serait une amélioration peu coûteuse.
+- **Changement** (banc uniquement, aucun code de production modifié) :
+  - le jeu d'évaluation passe à des **variantes par langue** : `"variants": {"fr": […], "en": […]}`. Chaque langue est une liste, pour pouvoir ajouter plus tard des reformulations ;
+  - les traductions anglaises sont **fidèles**, sans vocabulaire tiré des fils (pas de `jwt`, d'`upstream` ni d'`unauthorized`), sans quoi on mesurerait la connaissance du corpus et non l'effet de la langue ;
+  - `RetrievalEvaluationTest` calcule les rangs et les métriques **par langue**, sans jamais les mélanger. Il échoue si une question n'a pas toutes les langues, puisque des métriques sur 9 questions et sur 10 ne sont pas comparables. Avec plusieurs formulations dans une langue, il retient le **pire rang**, le choix le plus exigeant. Le rapport affiche une légende des colonnes.
+- **Mesure** : la colonne FR redonne exactement la mesure de E12 (non-régression de la refactorisation).
+
+  | # | FR | EN | | # | FR | EN |
+  |---|---|---|---|---|---|---|
+  | 1 | 1 | 1 | | 6 | 1 | 1 |
+  | 2 | 4 | **16** | | 7 | 1 | 1 |
+  | 3 | 2 | 4 | | 8 | 7 | **2** |
+  | 4 | 2 | 2 | | 9 | 12 | **9** |
+  | 5 | 18 | 22 | | 10 | 26 | 17 |
+
+  | Langue | Hit@5 | Hit@10 | MRR |
+  |---|---|---|---|
+  | FR | 60 % | 70 % | 0,457 |
+  | EN | 60 % | 70 % | 0,453 |
+
+- **Lecture** :
+  - en moyenne, **aucune différence** ; question par question, **tout bouge** : trois questions progressent en anglais (8, 9, 10), trois reculent (2, 3, 5), et les écarts se compensent. La question 9 entre dans le top 10 en anglais, la question 2 en sort ;
+  - **seconde hypothèse réfutée** : « le rang s'améliore quand la question est dans la langue du fil ». Les sept fils de référence vérifiés sont **tous en anglais**, y compris celui de la question 2, qui recule pourtant en anglais ;
+  - explication restante : la **sensibilité à la formulation**. Le fil de la question 2 demande combien de temps prend l'activation d'OAuth ; la version anglaise de la question insiste sur le blocage (`blocked`, `prevent`) et s'en éloigne. Même sens, autre formulation : jusqu'à **12 rangs** d'écart ;
+  - plafond d'une recherche multi-formulation : en gardant le meilleur des deux rangs, on obtiendrait 1, 4, 2, 2, 18, 1, 1, 2, 9, 17, soit un Hit@10 de **80 %**. C'est un plafond optimiste : une vraie fusion (RRF) ne retombe pas toujours sur le meilleur rang.
+- **Observation sur la question 10** : son fil dit « *the jwt is signed by [HOST], not [HOST]* ». Les deux noms d'hôte, qui indiquaient les environnements Ping de production et de préproduction, sont devenus deux `[HOST]` identiques : l'anonymisation a effacé exactement l'information qui distingue ce fil.
+- **Leçons** :
+  - `bge-m3` gère bien le mélange français-anglais en moyenne : traduire systématiquement la question n'est pas une amélioration ;
+  - **lire les rangs question par question** : des moyennes identiques peuvent cacher des mouvements forts qui se compensent ;
+  - **notre banc est bruité** : avec une seule formulation par langue, un écart de quelques rangs entre deux configurations peut n'être que du bruit de formulation. Il faut mesurer ce bruit (reformulations dans la même langue) avant de juger une amélioration fine ;
+  - les reformulations doivent être écrites **sans connaître les fils de référence** (par exemple par un LLM qui ne voit que la question d'origine), sinon leur vocabulaire s'y glisse ;
+  - une anonymisation qui remplace des valeurs différentes par le même masque peut effacer l'information qui rend un document pertinent.
+
 ---
 
 ## 3. Historique des mesures
@@ -317,6 +353,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 | 2026-11-15 | `bge-m3-8k`, chunk 1500, nettoyage + anonymisation, filtre `humanReplyCount > 0`, top 10 | 60 % | 70 % | 0,383 |
 | 2026-11-15 | + filtre `responderReplyCount > 0`, nettoyage avant anonymisation, `[HOST]` et `[IP]` (E12) | 60 % | 70 % | 0,457 |
 | 2026-11-15 | inchangé : recherche par mots-clés explorée en SQL, non intégrée (E13) | 60 % | 70 % | 0,457 |
+| 2026-11-17 | même configuration, questions traduites en anglais (E14, colonne EN) | 60 % | 70 % | 0,453 |
 
 ---
 
@@ -380,16 +417,17 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 
 Par ordre de priorité, chacune à mesurer contre la référence de la section 3 :
 
-1. **Reranking** (E14) : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
-2. **Recherche hybride** : à reprendre seulement après avoir ajouté au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
-3. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI) avant la recherche. Cible : le décalage de vocabulaire (E7). Attention à l'effet observé en E13 avec les synonymes.
-4. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
-5. **Ajuster la consigne sur les dates** (E10).
-6. **Calibrer un seuil de similarité** pour les questions hors sujet, avec `bge-m3`.
-7. **Évaluer la génération**, et pas seulement la recherche : fidélité au contexte, sources correctes, par exemple avec un LLM juge.
-8. **Industrialiser** : tests d'intégration autonomes (Testcontainers), schéma géré par Liquibase, refactoring en architecture hexagonale.
-9. **Anonymisation plus fine** : garder une partie utile et non sensible des valeurs masquées (`[HOST:prep]`, `[HOST:prod]`), pour ne pas perdre l'environnement concerné (E13).
-10. **Nettoyage** : un emoji collé à un mot (`:question:Submitted`) n'est pas retiré.
+1. **Mesurer le bruit de formulation** : ajouter une ou deux reformulations françaises par question, écrites sans connaître les fils de référence (par exemple par un LLM), et observer la variation des rangs (E14). Permet de savoir quel écart est significatif avant de juger les expériences suivantes.
+2. **Reranking** : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
+3. **Recherche hybride** : à reprendre seulement après avoir ajouté au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
+4. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI), chercher avec chacune, puis fusionner. Cible : le décalage de vocabulaire (E7) et la sensibilité à la formulation (E14, plafond optimiste de 80 % de Hit@10). Attention à l'effet observé en E13 avec les synonymes.
+5. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
+6. **Ajuster la consigne sur les dates** (E10).
+7. **Calibrer un seuil de similarité** pour les questions hors sujet, avec `bge-m3`.
+8. **Évaluer la génération**, et pas seulement la recherche : fidélité au contexte, sources correctes, par exemple avec un LLM juge.
+9. **Industrialiser** : tests d'intégration autonomes (Testcontainers), schéma géré par Liquibase, refactoring en architecture hexagonale.
+10. **Anonymisation plus fine** : garder une partie utile et non sensible des valeurs masquées (`[HOST:prep]`, `[HOST:prod]`), pour ne pas perdre l'environnement concerné (E13).
+11. **Nettoyage** : un emoji collé à un mot (`:question:Submitted`) n'est pas retiré.
 
 ---
 

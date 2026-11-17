@@ -1,63 +1,93 @@
 [
   {
-    "question": "Pour une API consommée par une application front publique, faut-il utiliser une API Key ou OAuth ? Comment l'application obtient-elle ses identifiants ?",
+    "variants": {
+      "fr": ["Pour une API consommée par une application front publique, faut-il utiliser une API Key ou OAuth ? Comment l'application obtient-elle ses identifiants ?"],
+      "en": ["For a public front-end application consuming an API, should we use an API Key or OAuth? How does the application obtain its credentials?"]
+    },
     "expectedThreadIds": [
       "1678267480.494399"
     ]
   },
   {
-    "question": "J'ai demandé l'activation d'OAuth sur mon API, mais elle bloque. Qu'est-ce qui peut empêcher son activation ?",
+    "variants": {
+      "fr": ["J'ai demandé l'activation d'OAuth sur mon API, mais elle bloque. Qu'est-ce qui peut empêcher son activation ?"],
+      "en": ["I requested OAuth activation for my API, but it's blocked. What could prevent its activation?"]
+    },
     "expectedThreadIds": [
       "1679047013.963469"
     ]
   },
   {
-    "question": "Ma demande d'abonnement reste en attente, ou l'API owner ne la voit pas dans son dashboard : qui doit la valider et où retrouver la demande ?",
+    "variants": {
+      "fr": ["Ma demande d'abonnement reste en attente, ou l'API owner ne la voit pas dans son dashboard : qui doit la valider et où retrouver la demande ?"],
+      "en": ["My subscription request is still pending, or the API owner does not see it in their dashboard: who should validate it and where can I find the request?"]
+    },
     "expectedThreadIds": [
       "1763386096.015409",
       "1606142585.286900"
     ]
   },
   {
-    "question": "Le bouton de rotation du token n'est plus disponible et le token a expiré : que faut-il faire ?",
+    "variants": {
+      "fr": ["Le bouton de rotation du token n'est plus disponible et le token a expiré : que faut-il faire ?"],
+      "en": ["The token rotation button is no longer available and the token has expired: what should be done?"]
+    },
     "expectedThreadIds": [
       "1696234832.079459"
     ]
   },
   {
-    "question": "L'URL Swagger fonctionne dans un navigateur, mais le DevPortal reçoit une erreur 401 en récupérant la documentation. Pourquoi ?",
+    "variants": {
+      "fr": ["L'URL Swagger fonctionne dans un navigateur, mais le DevPortal reçoit une erreur 401 en récupérant la documentation. Pourquoi ?"],
+      "en": ["The Swagger URL works in a browser, but the DevPortal receives a 401 error when retrieving the documentation. Why?"]
+    },
     "expectedThreadIds": [
       "1787122434.185679",
       "1759141275.633129"
     ]
   },
   {
-    "question": "Mon appel API en UAT renvoie 403 : faut-il utiliser à la fois l'API Key et un token Ping, et vérifier une whitelist réseau ?",
+    "variants": {
+      "fr": ["Mon appel API en UAT renvoie 403 : faut-il utiliser à la fois l'API Key et un token Ping, et vérifier une whitelist réseau ?"],
+      "en": ["My API call in UAT returns 403: do I need to use both an API Key and a Ping token, and check a network whitelist?"]
+    },
     "expectedThreadIds": [
       "1788934562.938569"
     ]
   },
   {
-    "question": "Pourquoi Kong renvoie-t-il 502 alors que l'API backend semble disponible ? Comment vérifier si le problème vient du réseau entre Kong et le backend ?",
+    "variants": {
+      "fr": ["Pourquoi Kong renvoie-t-il 502 alors que l'API backend semble disponible ? Comment vérifier si le problème vient du réseau entre Kong et le backend ?"],
+      "en": ["Why does Kong return 502 when the API backend seems to be available? How can I check if the problem is due to the network between Kong and the backend?"]
+    },
     "expectedThreadIds": [
       "1699461829.156659"
     ]
   },
   {
-    "question": "Quelles plages d'IP sortantes du DevPortal faut-il autoriser dans le firewall, en non-prod ou en prod ?",
+    "variants": {
+      "fr": ["Quelles plages d'IP sortantes du DevPortal faut-il autoriser dans le firewall, en non-prod ou en prod ?"],
+      "en": ["Which ranges of outgoing IP addresses from the DevPortal should be authorized in the firewall, in non-prod or prod?"]
+    },
     "expectedThreadIds": [
       "1718279986.111519",
       "1777017615.472889"
     ]
   },
   {
-    "question": "Des appels reçoivent une 504 après environ deux secondes : comment vérifier si le timeout de la gateway est en cause ?",
+    "variants": {
+      "fr": ["Des appels reçoivent une 504 après environ deux secondes : comment vérifier si le timeout de la gateway est en cause ?"],
+      "en": ["Calls receive a 504 after about two seconds: how can I check if the gateway timeout is the cause?"]
+    },
     "expectedThreadIds": [
       "1777296608.381479"
     ]
   },
   {
-    "question": "En UAT, le token est signé par Ping PROD alors que le backend attend Ping PREP : comment corriger le fournisseur Ping utilisé ?",
+    "variants": {
+      "fr": ["En UAT, le token est signé par Ping PROD alors que le backend attend Ping PREP : comment corriger le fournisseur Ping utilisé ?"],
+      "en": ["In UAT, the token is signed by Ping PROD but the backend expects Ping PREP: how can I fix the Ping provider used?"]
+    },
     "expectedThreadIds": [
       "1743867575.276269"
     ]

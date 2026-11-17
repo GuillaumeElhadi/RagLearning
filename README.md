@@ -1,29 +1,35 @@
 # RagLearning
 
-Projet d'apprentissage : construire un RAG (*Retrieval-Augmented Generation*) de A à Z sur des documents PDF, avec Spring AI.
+Projet d'apprentissage : construire un RAG (*Retrieval-Augmented Generation*) de A à Z avec Spring AI.
+
+Le RAG répond aux questions de support sur le Developer Portal (API management avec Kong et Ping Identity) à partir de l'**historique anonymisé d'un canal Slack de support** : chaque fil (question, échanges, résolution) devient un document. Une première phase a porté sur un livre PDF ; ce code est conservé mais n'est plus branché.
+
+Le **pourquoi** de chaque choix, les expériences menées et leurs mesures sont dans le [journal d'expérimentation](docs/rag-journal.md). Ce README décrit **comment le projet fonctionne**.
 
 ## Le principe en deux pipelines
 
 Un RAG, ce sont deux processus distincts qui partagent la même base vectorielle :
 
 ```
-INGESTION (une fois, puis à chaque nouveau document)
-  PDF ──► DocumentReader ──► TextSplitter ──► EmbeddingModel ──► pgvector
-          (texte + métadonnées)  (chunks)       (texte → vecteur)   (stockage)
+INGESTION (à la demande, rag.ingestion.enabled=true)
+  export Slack ──► SlackDocumentReader ──► TokenTextSplitter ──► EmbeddingModel ──► pgvector
+  (JSON)           1 Document par fil :     (chunks de 1500       (texte → vecteur)   (stockage)
+                   nettoyage, PUIS           tokens au plus)
+                   anonymisation, métadonnées
 
 REQUÊTE (à chaque question)
-  Question ──► EmbeddingModel ──► pgvector ──► LLM ──► Réponse
-               (même modèle !)   (top-k chunks   (lit le TEXTE
-                                  les plus proches) des chunks)
+  Question ──► EmbeddingModel ──► pgvector ──────────► ThreadContextFormatter ──► LLM ──► Réponse
+               (même modèle !)   top 10 fils répondus    <thread id date>…</thread>   (prompt system :
+                                 (responderReplyCount > 0)                             citations, dates)
 ```
 
 | Rôle | Outil | Pourquoi |
 |------|-------|----------|
 | Modèle d'embedding (« le bibliothécaire ») | Ollama + `bge-m3` (variante `bge-m3-8k`) | Local, gratuit, multilingue (français/anglais), textes longs ; ~1,1 Go, vecteurs de 1024 dimensions |
 | Base vectorielle | PostgreSQL 18 + extension pgvector | Calcule les distances entre vecteurs |
-| LLM (« l'élève qui répond ») | Anthropic Claude Haiku 5.5 | Rédige la réponse à partir du texte des chunks |
+| LLM (« l'élève qui répond ») | Anthropic Claude Haiku 5.5 | Rédige la réponse à partir du texte des fils retrouvés |
 
-Le modèle d'embedding et le LLM sont **indépendants** : Claude ne voit jamais les vecteurs, seulement le texte des chunks retrouvés.
+Le modèle d'embedding et le LLM sont **indépendants** : Claude ne voit jamais les vecteurs, seulement le texte des fils retrouvés.
 
 ## Prérequis
 
@@ -45,13 +51,22 @@ Le modèle d'embedding et le LLM sont **indépendants** : Claude ne voit jamais 
 # 1. Lancer la base vectorielle (depuis la racine du projet)
 docker compose -f docker/compose.yaml up -d
 
-# 2. Lancer l'application (ou via IntelliJ)
+# 2. Lancer l'application (ou via IntelliJ) : elle sert les routes de recherche
 ./mvnw spring-boot:run
 ```
 
 Au premier démarrage, Spring AI crée lui-même les extensions, la table `devportal_knowledge` et son index.
 
-Les PDF à indexer sont placés dans le dossier `sources/` (configurable, voir plus bas). Au démarrage, l'application **ingère tous les PDF de ce dossier** (voir [Ingestion](#ingestion)).
+**L'ingestion est désactivée par défaut** (`rag.ingestion.enabled=false`), pour qu'elle ne se déclenche jamais par accident (redémarrage de devtools, tests `@SpringBootTest`). Pour ingérer les exports Slack (`*.json`) du dossier `rag.ingestion.source-dir` :
+
+```bash
+# Repartir d'une table vide (voir « Ingestion idempotente »)
+psql -h localhost -p 5433 -U raguser ragdb -c "TRUNCATE devportal_knowledge;"
+
+./mvnw spring-boot:run -Dspring-boot.run.arguments=--rag.ingestion.enabled=true
+```
+
+⚠️ Le dossier `sources/` contient des données réelles : il n'est pas versionné, et seule sa version **anonymisée** atteint la base.
 
 ## Configuration
 
@@ -106,7 +121,8 @@ Les PDF à indexer sont placés dans le dossier `sources/` (configurable, voir p
 
 | Propriété | Signification |
 |-----------|---------------|
-| `rag.ingestion.source-dir=sources` | Dossier des PDF à ingérer, relatif au dossier de lancement. Valeur par défaut surchargeable sans toucher au fichier : une variable d'environnement ou un argument de ligne de commande est prioritaire sur `application.properties` (*relaxed binding* : `RAG_INGESTION_SOURCEDIR`, `--rag.ingestion.source-dir=...`). |
+| `rag.ingestion.enabled=false` | Active l'ingestion au démarrage (`CommandLineIngestor` et `RagIngestorService` n'existent que si la valeur est `true`). Laisser `false` dans le fichier versionné, et l'activer en argument au besoin. |
+| `rag.ingestion.source-dir` | Dossier des exports Slack (`*.json`) à ingérer. Valeur par défaut surchargeable sans toucher au fichier : une variable d'environnement ou un argument de ligne de commande est prioritaire sur `application.properties` (*relaxed binding* : `RAG_INGESTION_SOURCEDIR`, `--rag.ingestion.source-dir=...`). |
 
 ⚠️ `initialize-schema` **crée** la table si elle n'existe pas, mais **ne la modifie jamais**. Après un changement de `dimensions` ou de `table-name`, supprimer l'ancienne table (`DROP TABLE ...`) **avant** de redémarrer : dans PostgreSQL, un nom d'index est unique dans tout le schéma, et un ancien index du même nom empêcherait la création de celui de la nouvelle table (`already exists, skipping`). Ne pas utiliser `remove-existing-vector-store-table=true` pour cela : la table serait supprimée **à chaque démarrage**.
 
@@ -124,49 +140,51 @@ Affiche chaque requête SQL exécutée par Spring (création du schéma, inserti
 Le pipeline suit le modèle ETL de Spring AI : `DocumentReader` (Extract) → `DocumentTransformer` (Transform) → `DocumentWriter` (Load).
 
 ```
-sources/*.pdf
-   │  CommandLineRunner (RagLearningApplication)
+sources/*.json (export Slack)
+   │  CommandLineIngestor (seulement si rag.ingestion.enabled=true)
    ▼
-RagIngestorService.ingestPdf()
-   ├─ ParagraphPdfDocumentReader   1 Document par entrée du plan du PDF (section / chapitre)
-   ├─ TokenTextSplitter            redécoupe les documents trop longs (1500 tokens)
-   └─ VectorStore.add()            ajoute les chunks par lots séquentiels de 100
+RagIngestorService.ingestSlackHistory()
+   ├─ SlackDocumentReader    1 Document par fil, texte nettoyé puis anonymisé, métadonnées
+   ├─ TokenTextSplitter      redécoupe les fils trop longs (1500 tokens)
+   ├─ identifiants stables   même fil, même découpage ⇒ mêmes identifiants de chunks
+   └─ VectorStore.add()      vectorise et insère par lots séquentiels de 100
 ```
 
-La barre de progression est affichée par fichier et avance uniquement après la réussite d'un lot. Elle indique donc les chunks dont l'appel au vector store est terminé, pas l'avancement interne d'Ollama ou de PostgreSQL.
+La barre de progression avance uniquement après la réussite d'un lot. Elle indique donc les chunks dont l'appel au vector store est terminé, pas l'avancement interne d'Ollama ou de PostgreSQL.
 
-### Historique Slack
+### Le lecteur Slack
 
-Les conversations Slack sont indexées comme un document par fil afin de conserver le contexte question/réponse. Une classification déterministe en Java associe chaque fil à une catégorie (`TIMEOUT_CHANGE`, `GATEWAY_ACCESS`, `API_KEY_OAUTH`, `RUN_ISSUE`, `APPROVAL_VALIDATION` ou `OTHER`) et à un identifiant de modèle calculé à partir du texte normalisé. Le texte original des demandes est conservé, notamment les détails propres à chaque API, application et environnement.
+| Composant | Rôle |
+|-----------|------|
+| `SlackDocumentReader` | Regroupe les messages par fil, écarte les réponses vides, calcule les métadonnées, produit un `Document` par fil |
+| `SlackMarkupCleaner` | Retire le bruit Slack : caractères illisibles, étiquettes d'espace de travail, emojis `:shortcode:`, champs de formulaire vides, gras, espaces et sauts de ligne superflus |
+| `SlackAnonymizer` | Nettoie (via `SlackMarkupCleaner`), **puis** anonymise ; déduplique les réponses de bot identiques |
+| `SlackRequestClassifier` | Classe chaque fil (`TIMEOUT_CHANGE`, `GATEWAY_ACCESS`, `API_KEY_OAUTH`, `RUN_ISSUE`, `APPROVAL_VALIDATION`, `OTHER`) et lui attribue un identifiant de modèle de demande |
 
-Pour un même modèle autre que `OTHER`, une seule réponse de bot au texte exactement identique est conservée dans le canal ; les fils `OTHER` ne sont pas dédupliqués entre eux, et les réponses seulement similaires ne sont pas fusionnées. Les auteurs deviennent `USER A`, `USER B`, etc. (alias déterministes dans l'export), et les messages de bot sont étiquetés `RUNBOY`. Les mentions Slack sont converties en alias ; les affectations `clientID`, `client secret`, `login`, `password` et les adresses e-mail sont masquées avant l'envoi au vector store.
+**Anonymisation** — elle est toujours la **dernière transformation du texte** : une étape qui supprimerait ou réécrirait des caractères après elle pourrait recomposer une donnée que les règles n'avaient pas reconnue (voir E12 dans le journal).
 
-Cette anonymisation ne peut pas reconnaître les noms de personnes ou les secrets écrits en texte libre sans marqueur explicite. Pour un export partagé ou une ingestion en production, il faut aussi contrôler les données à la source et vérifier les textes nettoyés avant indexation.
+| Donnée | Remplacement |
+|--------|--------------|
+| Auteurs, mentions `<@U…>`, noms en texte brut du formulaire (`Submitted by …`) | `USER A`, `USER B`… (alias déterministes) ; messages de bot : `RUNBOY` |
+| Liens Slack | Leur libellé, sinon leur chemin |
+| URL complètes | `[URL]` |
+| Noms d'hôte sans schéma (extensions publiques et internes listées) | `[HOST]` |
+| Adresses IPv4 | `[IP]` |
+| UUID (préfixe de type conservé : `api-[UUID]`) | `[UUID]` |
+| En-têtes `Authorization`, clés d'API, JWT, `clientID`, `client secret`, `login`, `password` | masqués |
+| Adresses e-mail | `[REDACTED_EMAIL]` ; les champs e-mail de l'export ne sont même pas chargés (minimisation) |
 
-| Composant | Rôle | Choix |
-|-----------|------|-------|
-| `ParagraphPdfDocumentReader` | Lit le PDF et produit un `Document` (texte + métadonnées) par entrée du **plan** (*outline* / signets) | Malgré son nom, il découpe par **section** et non par paragraphe : c'est la stratégie « par structure ». Préférable au découpage par page, car une page n'est pas une frontière de sens. |
-| `TokenTextSplitter` | Découpe les `Document` trop longs en chunks | `chunkSize` de 1500 tokens (800 par défaut). Un document plus court reste en un seul chunk : avec cette valeur, environ 99 % des fils Slack restent entiers, ce qui garde ensemble la question et sa résolution. Les tokens sont comptés avec un tokenizer différent de celui de `bge-m3` : c'est une approximation, d'où la marge par rapport à la limite de 8192. |
-| `VectorStore` (pgvector) | Vectorise chaque chunk via le modèle d'embedding, puis l'insère par lots de 100 | On n'appelle jamais Ollama directement. |
+Ces règles ne peuvent pas reconnaître un nom ou un secret écrit en texte libre sans marqueur. Pour un export partagé ou une ingestion en production, il faut aussi contrôler les données à la source et vérifier le texte stocké (voir [Vérifications utiles](#vérifications-utiles)).
 
-Le bean `TokenTextSplitter` est déclaré dans `BeansConfig` et injecté **avec son type précis** : si plusieurs `DocumentTransformer` coexistent un jour, injecter l'interface rendrait le choix ambigu.
+**Découpage** — `TokenTextSplitter` (bean de `BeansConfig`, injecté avec son type précis) avec un `chunkSize` de 1500 tokens. Un fil plus court reste en un seul chunk : environ 99 % des fils restent entiers, ce qui garde ensemble la question et sa résolution. Les tokens sont comptés avec un tokenizer différent de celui de `bge-m3` : c'est une approximation, d'où la marge par rapport à la limite de 8192.
 
-### Prérequis du lecteur par plan
+### Ingestion idempotente
 
-`ParagraphPdfDocumentReader` exige que le PDF ait un **plan** (des signets), ce qui n'est pas la même chose qu'une page « Sommaire » imprimée. Pour vérifier :
+Les chunks reçoivent des **identifiants stables** et pgvector fait un **upsert** (`ON CONFLICT DO UPDATE`) : réingérer le même export ne crée pas de doublons. En revanche, si le découpage ou le nettoyage change, d'anciens chunks peuvent rester **orphelins**. D'où le `TRUNCATE devportal_knowledge` avant chaque réingestion complète.
 
-- **Aperçu (macOS)** : *Présentation → Table des matières*. Une arborescence de chapitres cliquables = plan présent.
-- **Le lecteur lui-même** lève une exception si le plan est absent ; utiliser alors `PagePdfDocumentReader`.
-- **Par code** : `document.getDocumentCatalog().getDocumentOutline()` (PDFBox) renvoie `null` sans plan.
+### Première phase : un livre PDF
 
-### ⚠️ Ré-ingestion involontaire
-
-L'ingestion s'exécute **à chaque démarrage**, et donc aussi :
-
-- à **chaque recompilation**, car `spring-boot-devtools` redémarre l'application (`restartedMain` dans les logs) ;
-- à **chaque lancement des tests**, car `@SpringBootTest` exécute les `CommandLineRunner`.
-
-Chaque passage duplique tous les chunks. À rendre désactivable avant de travailler sur la recherche.
+`RagIngestorService.ingestPdf()` reste disponible (son appel est commenté dans `CommandLineIngestor`) : `ParagraphPdfDocumentReader` produit un document par entrée du **plan** du PDF (ses signets, pas la page « Sommaire »), puis `TextCleanerTransformer` nettoie le texte avant le découpage. Le lecteur lève une exception si le PDF n'a pas de plan ; utiliser alors `PagePdfDocumentReader`. Voir aussi [Problèmes connus à l'ingestion des PDF](#problèmes-connus-à-lingestion-des-pdf).
 
 ## Le modèle de données
 
@@ -174,12 +192,16 @@ Spring AI crée la table `devportal_knowledge`, avec **une ligne par chunk** :
 
 | Colonne | Contenu |
 |---------|---------|
-| `id` | Identifiant du chunk (UUID, via l'extension `uuid-ossp`) |
-| `content` | Le **texte** du chunk. Indispensable : un vecteur ne se « décompresse » pas, et c'est ce texte qui est envoyé au LLM. |
-| `metadata` | JSON libre : fichier source et page pour un PDF ; `source`, `channel`, `threadId`, `sourceDocumentId` pour un fil Slack |
+| `id` | Identifiant du chunk (UUID stable, calculé à partir du fil et de la position du chunk) |
+| `content` | Le **texte** du chunk, nettoyé et anonymisé. Indispensable : un vecteur ne se « décompresse » pas, et c'est ce texte qui est envoyé au LLM. |
+| `metadata` | Type **`json`** (pas `jsonb`). Pour un fil Slack : `source`, `channel`, `channelId`, `threadId`, `sourceDocumentId`, `author`, `date` (ISO, UTC), `year`, `requestCategory`, `requestTemplateId`, `humanReplyCount`, `responderReplyCount` |
 | `embedding` | Le vecteur du chunk, `vector(1024)` : ses coordonnées sur la « carte du sens » |
 
-Un index **HNSW** (`vector_cosine_ops`) accélère la recherche des plus proches voisins : il évite de comparer la question à chaque ligne, au prix d'un résultat *approximatif*. Vérifier sa présence avec `\d devportal_knowledge`.
+`responderReplyCount` compte les réponses humaines d'une **autre personne que le demandeur** (l'auteur du message racine, ou la personne citée dans le `Submitted by` du formulaire). C'est sur elle que filtre la recherche.
+
+Un index **HNSW** (`vector_cosine_ops`, nommé `devportal_knowledge_index`) accélère la recherche des plus proches voisins : il évite de comparer la question à chaque ligne, au prix d'un résultat *approximatif*. Vérifier sa présence avec `\d devportal_knowledge`.
+
+⚠️ La colonne `metadata` étant en `json`, l'opérateur `?` n'existe pas (et JDBC le prendrait pour un paramètre) et un `GROUP BY metadata` échoue : utiliser `metadata->>'clé'` et grouper par `id`.
 
 ## Ollama : longueur maximale d'un texte
 
@@ -211,29 +233,39 @@ curl -s http://localhost:11434/api/embed -d "{
 La recherche et la génération sont séparées en deux services :
 
 ```
-Question ──► RetrievalService ──► 5 chunks les plus proches
+Question ──► RetrievalService ──► 10 chunks les plus proches, fils répondus uniquement
                                       │
                                       ├──► /rag/related-chunks : retourne les chunks
                                       │
                                       └──► QuestionAnsweringService ──► Claude Haiku ──► réponse
-                                                                           (/rag/ask)
+                                             ThreadContextFormatter                       (/rag/ask)
 ```
 
-`RetrievalService` utilise la recherche par similarité de pgvector avec `topK=5`. Chaque résultat est exposé sous forme de `RetrievedChunk`, avec son score, ses métadonnées et son texte. `QuestionAnsweringService` fournit à Claude la question et ces chunks comme contexte. Son instruction système lui demande de ne pas inventer de réponse lorsque les ressources RAG ne la contiennent pas. Le client de chat est configuré dans `BeansConfig`; `SimpleLoggerAdvisor` ajoute la journalisation de l'appel au modèle.
+- **`RetrievalService`** : recherche par similarité de pgvector, `topK=10`, avec le filtre `responderReplyCount > 0` (les fils sans réponse d'une autre personne que le demandeur sont gardés en base mais écartés de la recherche). Chaque résultat est un `RetrievedChunk` : score, métadonnées, texte.
+- **`ThreadContextFormatter`** : met chaque chunk dans une balise `<thread id="…" date="…">…</thread>`. Sans résultat, le contexte indique « No thread matched this question. ».
+- **`QuestionAnsweringService`** : envoie à Claude la date du jour, les fils et la question. Le prompt system (`src/main/resources/prompts/system-prompt.st`, sans accolades car c'est un gabarit) lui demande notamment de :
+  - dire quand les fils ne contiennent pas la réponse ;
+  - privilégier les fils récents et signaler ceux de plus de deux ans ;
+  - présenter un fil comme « un cas passé », pas comme une règle ;
+  - citer ses sources (date, identifiant du fil) ;
+  - ne jamais deviner les valeurs masquées (`[HOST]`, `[UUID]`…) ni mentionner de personnes ;
+  - répondre dans la langue de la question.
+
+Le client de chat est configuré dans `BeansConfig` ; `SimpleLoggerAdvisor` journalise l'appel au modèle (blocs de réflexion, tokens, raison d'arrêt). La réponse ignore les résultats vides, car un bloc de réflexion peut arriver en premier.
 
 Les deux routes attendent la question dans le paramètre `userRequest` :
 
 ```bash
 # Inspecter les chunks trouvés sans appeler le LLM
-curl -G --data-urlencode "userRequest=Quelle est la définition de X ?" \
+curl -G --data-urlencode "userRequest=Comment augmenter le timeout de mon API en PROD ?" \
   http://localhost:8080/rag/related-chunks
 
 # Poser une question au RAG
-curl -G --data-urlencode "userRequest=Quelle est la définition de X ?" \
+curl -G --data-urlencode "userRequest=Comment augmenter le timeout de mon API en PROD ?" \
   http://localhost:8080/rag/ask
 ```
 
-`/rag/related-chunks` renvoie une liste de chunks (`score`, `metadata`, `content`). `/rag/ask` renvoie la réponse générée dans un tableau JSON contenant une chaîne. Il est utile de commencer par la première route pour distinguer un problème de recherche d'un problème de génération.
+`/rag/related-chunks` renvoie une liste de chunks (`score`, `metadata`, `content`). `/rag/ask` renvoie la réponse générée. Commencer par la première route permet de distinguer un problème de recherche d'un problème de génération.
 
 ## Vérifications utiles
 
@@ -256,6 +288,14 @@ SELECT count(*), count(DISTINCT content) FROM devportal_knowledge;
 -- Structure de la table et présence de l'index HNSW (psql)
 \d devportal_knowledge
 
+-- Fils répondus vs non répondus
+SELECT (metadata->>'responderReplyCount')::int > 0 AS repondu, count(*)
+FROM devportal_knowledge GROUP BY 1;
+
+-- Contrôles d'anonymisation : doivent renvoyer 0
+SELECT count(*) FROM devportal_knowledge WHERE content ~* '[a-z0-9.-]+@[a-z0-9-]+\.[a-z]{2,}';
+SELECT count(*) FROM devportal_knowledge WHERE content ~ '(\d{1,3}\.){3}\d{1,3}';
+
 -- Repartir de zéro avant une nouvelle ingestion
 TRUNCATE devportal_knowledge;
 ```
@@ -265,14 +305,16 @@ Pour voir le SQL exécuté par Spring, activer temporairement `logging.level.org
 ## Règles à retenir
 
 - **Même modèle d'embedding** pour les documents et pour les questions : deux modèles = deux cartes incompatibles.
-- **Changer de modèle d'embedding = tout ré-indexer.** Les PDF sources restent la source de vérité, les vecteurs sont un dérivé jetable.
+- **Changer de modèle d'embedding = tout ré-indexer.** Les sources restent la source de vérité, les vecteurs sont un dérivé jetable.
 - **`dimensions` suit le modèle**, pas l'inverse.
 - Les vecteurs servent uniquement à **retrouver** ; le LLM ne lit que du **texte**.
+- **Anonymiser en dernier**, et vérifier le texte stocké avec des requêtes de contrôle, pas seulement avec des tests unitaires.
+- **Mesurer avant et après chaque changement** avec le banc d'évaluation, et consigner le résultat dans le journal.
 - **Sous Ollama, la longueur maximale d'un texte à vectoriser est min(`num_ctx`, `num_batch`)**, 2048 par défaut. Toujours vérifier la limite effective plutôt que celle annoncée par le modèle.
 - **Préférer un échec bruyant à une perte silencieuse** : `truncate=false` plutôt qu'une troncature invisible.
 - **La référence pour les propriétés d'une bibliothèque Spring est son catalogue** (`META-INF/spring-configuration-metadata.json` dans le JAR, celui qu'utilise l'autocomplétion d'IntelliJ), pas la documentation : une propriété documentée mais absente du catalogue peut être ignorée sans avertissement.
 
-## Problèmes connus à l'ingestion
+## Problèmes connus à l'ingestion des PDF
 
 Aucun n'est bloquant (l'ingestion va au bout), mais les deux premiers dégradent la **qualité des chunks**. Un RAG ne retrouve pas ce que l'extraction a abîmé : *garbage in, garbage out*.
 
@@ -295,12 +337,34 @@ Les messages PDFBox peuvent être réduits avec `logging.level.org.apache.pdfbox
 
 ## Évaluer le RAG
 
-Un RAG peut échouer à deux endroits : il **retrouve les mauvais chunks**, ou il **retrouve les bons mais répond mal**. On les teste séparément, dans l'ordre :
+Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il **retrouve les bons mais répond mal**. On les teste séparément, en commençant par la recherche.
 
-1. **La recherche seule, sans LLM** : `VectorStore.similaritySearch(...)` avec la question et un *top-k*. Pour chaque résultat, afficher le score, la section ou la page d'origine (`metadata`) et le début du texte.
-2. **La génération** : prompt construit à partir des chunks retrouvés et de la question, envoyé à Claude.
+### Le banc d'évaluation de la recherche
 
-**Jeu d'évaluation** : quelques questions sur le PDF dont on connaît la réponse **et la page**, en mélangeant questions précises (une définition) et questions larges. Critère de la recherche : la bonne page apparaît-elle dans les cinq chunks retournés par `/rag/related-chunks` ? Pour la génération, vérifier que `/rag/ask` répond à partir du contexte et reconnaît les questions sans réponse dans les ressources. Ce jeu sert à comparer objectivement chaque changement (nettoyage du texte, taille de chunk, lecteur…).
+- **Jeu d'évaluation** : `src/test/resources/evaluation/retrieval-questions.json`, 10 questions réelles, chacune avec ses formulations par langue (`"variants": {"fr": […], "en": […]}`) et le ou les fils de référence (`expectedThreadIds`) vérifiés à la main. Les traductions anglaises sont fidèles, sans vocabulaire tiré des fils.
+- **Test** : `RetrievalEvaluationTest` interroge la recherche avec une profondeur de 30, classe les résultats par fil distinct, puis affiche, **pour chaque langue**, le rang de la première référence pour chaque question (le pire rang si une langue a plusieurs formulations), ainsi que :
+  - **Hit@5** et **Hit@10** : part des questions dont une référence est dans les 5 (ou 10) premiers fils ;
+  - **MRR** : moyenne de 1/rang de la première référence.
+- **Lancement** (il interroge la vraie base et Ollama, d'où la variable qui l'active) :
+  ```bash
+  RAG_EVALUATION=true ./mvnw test -Dtest=RetrievalEvaluationTest
+  ```
+
+Mesure actuelle : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
+
+⚠️ Ne jamais reprendre une question du jeu comme exemple dans un prompt : on ajusterait le système au jeu d'évaluation (sur-apprentissage), et les mesures ne vaudraient plus rien.
+
+### Exploration : extraction de mots-clés (E13)
+
+`KeywordExtractionExplorationTest` affiche les mots-clés qu'un LLM extrait de chaque question du jeu, avec le prompt `src/main/resources/prompts/keyword-extraction.st`. Il a servi à explorer la recherche par mots-clés, dont l'hypothèse a été réfutée (voir E13). Il appelle Anthropic : `ANTHROPIC_API_KEY` doit être définie dans l'environnement.
+
+```bash
+RAG_EVALUATION=true ./mvnw test -Dtest=KeywordExtractionExplorationTest
+```
+
+### La génération
+
+À évaluer ensuite : `/rag/ask` répond-il à partir du contexte, cite-t-il les bons fils, reconnaît-il les questions sans réponse dans les fils ?
 
 ## Journal d'expérimentation
 
@@ -310,11 +374,21 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 
 - [x] Infrastructure : PostgreSQL + pgvector via Docker Compose
 - [x] Configuration Spring AI : datasource, Ollama, pgvector, Anthropic
-- [x] Ingestion : lire un PDF, découper en chunks, stocker les vecteurs
-- [ ] Ingestion désactivable (éviter les doublons avec devtools et les tests)
-- [ ] Nettoyage du texte extrait avant découpage
-- [ ] Jeu de questions d'évaluation
-- [x] Recherche : retrouver les cinq chunks les plus proches d'une question (`/rag/related-chunks`)
-- [x] Génération : fournir la question et les chunks à Claude Haiku (`/rag/ask`)
+- [x] Ingestion d'un PDF (première phase)
+- [x] Ingestion de l'historique Slack : un document par fil, découpage à 1500 tokens
+- [x] Contexte effectif d'Ollama porté à 8192 tokens (`bge-m3-8k`)
+- [x] Ingestion désactivable et idempotente
+- [x] Nettoyage du bruit Slack, puis anonymisation en dernier
+- [x] Recherche filtrée sur les fils répondus (`/rag/related-chunks`)
+- [x] Génération avec prompt system, date du jour et citations (`/rag/ask`)
+- [x] Banc d'évaluation de la recherche (Hit@5, Hit@10, MRR)
+- [x] Exploration de la recherche par mots-clés : hypothèse réfutée (E13)
+- [x] Questions d'évaluation en français et en anglais : pas d'effet de langue moyen, forte sensibilité à la formulation (E14)
+- [ ] Mesure du bruit de formulation (reformulations dans la même langue)
+- [ ] Reranking des 30 premiers candidats
+- [ ] Évaluation de la génération
 - [ ] Refactoring en architecture hexagonale
 - [ ] Comparaison avec l'advisor Spring AI (`QuestionAnswerAdvisor`)
+
+Les prochaines expériences, par priorité, sont détaillées dans le [journal](docs/rag-journal.md#5-prochaines-expériences).
+
