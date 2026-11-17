@@ -1,7 +1,7 @@
 package fr.elhadi.raglearning.evaluation;
 
-import fr.elhadi.raglearning.models.RetrievedChunk;
-import fr.elhadi.raglearning.services.RetrievalService;
+import fr.elhadi.raglearning.retrieval.RetrievalService;
+import fr.elhadi.raglearning.retrieval.RetrievedChunk;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;

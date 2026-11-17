@@ -1,0 +1,291 @@
+package fr.elhadi.raglearning.ingestion.slack;
+
+import lombok.RequiredArgsConstructor;
+import org.springframework.ai.document.Document;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.stereotype.Component;
+import tools.jackson.databind.json.JsonMapper;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+@Component
+@RequiredArgsConstructor
+public class SlackDocumentReader {
+
+    /** Message réduit à son auteur après nettoyage (emoji seul, pièce jointe…). */
+    private static final Pattern EMPTY_RENDERED_MESSAGE =
+        Pattern.compile("^(?:RUNBOY|USER [A-Z]+|USER UNKNOWN):\\s*$");
+
+    /** Demandeur d'un formulaire du bot, quand il est donné par une mention : {@code Submitted by <@U123>}. */
+    private static final Pattern SUBMITTER_MENTION =
+        Pattern.compile("(?i)\\bSubmitted by\\b[\\h*:]*<@([A-Z0-9]+)");
+
+    private final JsonMapper jsonMapper;
+    private final SlackAnonymizer slackAnonymizer;
+    private final SlackRequestClassifier slackRequestClassifier;
+
+    public List<Document> read(String slackJsonExtractionPath) throws IOException {
+        final SlackExport slackExport;
+        try (InputStream inputStream = new FileSystemResource(slackJsonExtractionPath).getInputStream()) {
+            slackExport = jsonMapper.readValue(inputStream, SlackExport.class);
+        }
+        if (slackExport == null) {
+            throw new IOException("Slack export is empty: " + slackJsonExtractionPath);
+        }
+
+        final SlackChannel channel = slackExport.channel();
+        final String channelId = channel == null ? null : channel.id();
+        final String channelName = channel == null ? null : channel.name();
+        final String channelIdentity = firstNonBlank(channelId, channelName, "unknown-channel");
+        final List<SlackMessage> messages =
+            slackExport.messages() == null ? List.of() : slackExport.messages();
+        final List<SlackThread> threads = groupThreads(messages);
+        final List<Document> documents = new ArrayList<>(threads.size());
+        final Map<String, Set<String>> seenBotAnswersByTemplate = new HashMap<>();
+
+        for (SlackThread thread : threads) {
+            final String threadId = thread.threadId();
+            final SlackRequestClassifier.Classification classification =
+                slackRequestClassifier.classify(thread.root());
+            final Set<String> seenAnswers = classification.category()
+                == SlackRequestClassifier.Category.OTHER
+                ? new HashSet<>()
+                : seenBotAnswersByTemplate.computeIfAbsent(
+                    classification.templateId(),
+                    ignored -> new HashSet<>()
+                );
+            final RawMessage rawMessage =
+                slackAnonymizer.anonymize(thread.root(), threadId, seenAnswers);
+            final String documentId = documentId(channelIdentity, threadId);
+            final Map<String, Object> metadata = new HashMap<>();
+            metadata.put("source", "slack");
+            metadata.put("threadId", threadId);
+            metadata.put("sourceDocumentId", documentId);
+            metadata.put("requestCategory", classification.category().name());
+            metadata.put("requestTemplateId", classification.templateId());
+            metadata.put("humanReplyCount", humanReplyCount(thread.root().replies()));
+            metadata.put(
+                "responderReplyCount",
+                responderReplyCount(thread.root().replies(), requesterId(thread.root()).orElse(null))
+            );
+            if (channelId != null && !channelId.isBlank()) {
+                metadata.put("channelId", channelId);
+            }
+            if (rawMessage.author() != null) {
+                metadata.put("author", rawMessage.author());
+            }
+            if (channelName != null) {
+                metadata.put("channel", channelName);
+            }
+            threadDate(threadId, thread.root().ts()).ifPresent(date -> {
+                metadata.put("date", date.toString());
+                metadata.put("year", date.getYear());
+            });
+
+            final List<String> renderedMessages = new ArrayList<>();
+            final String request = rawMessage.userRequest().strip();
+            if (!("RUNBOY".equals(rawMessage.author()) && request.isBlank())) {
+                renderedMessages.add(rawMessage.author() + ": " + request);
+            }
+            rawMessage.replies().stream()
+                .filter(reply -> !EMPTY_RENDERED_MESSAGE.matcher(reply).matches())
+                .forEach(renderedMessages::add);
+            final String text = String.join("\n", renderedMessages);
+            if (text.isBlank()) {
+                continue;
+            }
+            documents.add(Document.builder()
+                .id(documentId)
+                .metadata(metadata)
+                .text(text)
+                .build());
+        }
+        return List.copyOf(documents);
+    }
+
+    private List<SlackThread> groupThreads(List<SlackMessage> messages) throws IOException {
+        final Map<String, SlackMessage> threads = new LinkedHashMap<>();
+        final List<SlackThread> topLevelReplies = new ArrayList<>();
+
+        for (int index = 0; index < messages.size(); index++) {
+            final SlackMessage message = messages.get(index);
+            if (message == null) {
+                throw new IOException("Slack export contains a null message at index " + index);
+            }
+            if (isTopLevelReply(message)) {
+                topLevelReplies.add(new SlackThread(message.threadTs(), message));
+                continue;
+            }
+            final String threadId = firstNonBlank(
+                message.ts(),
+                message.threadTs(),
+                "missing-ts-" + index
+            );
+            threads.putIfAbsent(threadId, message);
+        }
+
+        for (SlackThread topLevelReply : topLevelReplies) {
+            final SlackMessage parent = threads.get(topLevelReply.threadId());
+            if (parent == null) {
+                threads.putIfAbsent(topLevelReply.threadId(), topLevelReply.root());
+                continue;
+            }
+            if (!containsReply(parent.replies(), topLevelReply.root())) {
+                threads.put(topLevelReply.threadId(), withReply(parent, topLevelReply.root()));
+            }
+        }
+
+        return threads.entrySet().stream()
+            .map(entry -> new SlackThread(entry.getKey(), entry.getValue()))
+            .toList();
+    }
+
+    private boolean isTopLevelReply(SlackMessage message) {
+        return message.threadTs() != null
+            && !message.threadTs().isBlank()
+            && !Objects.equals(message.threadTs(), message.ts());
+    }
+
+    private boolean containsReply(List<SlackMessage> replies, SlackMessage candidate) {
+        for (SlackMessage reply : replies == null ? List.<SlackMessage>of() : replies) {
+            if (candidate.ts() != null && candidate.ts().equals(reply.ts())) {
+                return true;
+            }
+            if (candidate.ts() == null && candidate.equals(reply)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private SlackMessage withReply(SlackMessage parent, SlackMessage reply) {
+        final List<SlackMessage> replies = new ArrayList<>(
+            parent.replies() == null ? List.of() : parent.replies()
+        );
+        replies.add(reply);
+        return new SlackMessage(
+            parent.type(),
+            parent.subtype(),
+            parent.ts(),
+            parent.threadTs(),
+            parent.user(),
+            parent.botId(),
+            parent.botProfile(),
+            parent.text(),
+            parent.blocksText(),
+            parent.attachments(),
+            parent.reactions(),
+            replies
+        );
+    }
+
+    /**
+     * Nombre de réponses écrites par des humains, à tous les niveaux du fil. Un fil à zéro
+     * est une demande restée sans discussion (souvent un formulaire du bot) : il ne contient
+     * ni explication ni solution, et la recherche peut l'écarter avec un filtre sur cette valeur.
+     */
+    private int humanReplyCount(List<SlackMessage> replies) {
+        int count = 0;
+        for (SlackMessage reply : replies == null ? List.<SlackMessage>of() : replies) {
+            if (reply.botProfile() == null && reply.botId() == null) {
+                count++;
+            }
+            count += humanReplyCount(reply.replies());
+        }
+        return count;
+    }
+
+    /**
+     * Nombre de réponses écrites par un humain <b>autre que le demandeur</b>. Un « Thanks » ou
+     * une relance du demandeur seul ne compte pas : le fil n'a reçu aucune réponse de l'équipe.
+     * Si le demandeur est inconnu (formulaire qui le donne en texte brut), toutes les réponses
+     * humaines comptent, comme pour {@link #humanReplyCount}.
+     */
+    private int responderReplyCount(List<SlackMessage> replies, String requesterId) {
+        int count = 0;
+        for (SlackMessage reply : replies == null ? List.<SlackMessage>of() : replies) {
+            final boolean human = reply.botProfile() == null && reply.botId() == null;
+            if (human && (requesterId == null || !requesterId.equals(reply.user()))) {
+                count++;
+            }
+            count += responderReplyCount(reply.replies(), requesterId);
+        }
+        return count;
+    }
+
+    /**
+     * Identifiant Slack du demandeur : l'auteur du message racine s'il est humain, sinon
+     * la personne mentionnée dans le champ {@code Submitted by} du formulaire du bot.
+     */
+    private Optional<String> requesterId(SlackMessage root) {
+        if (root.botProfile() == null && root.botId() == null) {
+            return Optional.ofNullable(root.user());
+        }
+        final String text = root.blocksText() != null && !root.blocksText().isBlank()
+            ? root.blocksText()
+            : root.text();
+        if (text == null) {
+            return Optional.empty();
+        }
+        final Matcher submitter = SUBMITTER_MENTION.matcher(text);
+        return submitter.find() ? Optional.of(submitter.group(1)) : Optional.empty();
+    }
+
+    /**
+     * Date de début du fil, déduite de son horodatage Slack (secondes epoch, par exemple
+     * {@code 1548947556.013100}). Le threadId est préféré : c'est l'horodatage du premier message.
+     */
+    private Optional<LocalDate> threadDate(String threadId, String rootTimestamp) {
+        return epochDate(threadId).or(() -> epochDate(rootTimestamp));
+    }
+
+    private Optional<LocalDate> epochDate(String slackTimestamp) {
+        if (slackTimestamp == null || slackTimestamp.isBlank()) {
+            return Optional.empty();
+        }
+        final int dot = slackTimestamp.indexOf('.');
+        final String seconds = dot < 0 ? slackTimestamp : slackTimestamp.substring(0, dot);
+        try {
+            return Optional.of(
+                LocalDate.ofInstant(Instant.ofEpochSecond(Long.parseLong(seconds)), ZoneOffset.UTC)
+            );
+        } catch (NumberFormatException exception) {
+            return Optional.empty();
+        }
+    }
+
+    private String documentId(String channelIdentity, String threadId) {
+        return UUID.nameUUIDFromBytes(
+            (channelIdentity + ":" + threadId).getBytes(StandardCharsets.UTF_8)
+        ).toString();
+    }
+
+    private String firstNonBlank(String first, String second, String fallback) {
+        if (first != null && !first.isBlank()) {
+            return first;
+        }
+        if (second != null && !second.isBlank()) {
+            return second;
+        }
+        return fallback;
+    }
+
+    private record SlackThread(String threadId, SlackMessage root) {}
+}

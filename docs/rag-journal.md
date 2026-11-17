@@ -34,7 +34,6 @@ INGESTION (CommandLineIngestor, si rag.ingestion.enabled=true)
         ├─ SlackAnonymizer          alias, liens, UUID, secrets, e-mails, demandeurs
         └─ SlackMarkupCleaner       gabarit du bot, emojis, gras, champs vides
        + métadonnées : threadId, date, year, humanReplyCount, requestCategory…
-    → TextCleanerTransformer     espaces et lignes vides
     → TokenTextSplitter          1500 tokens (≈ 99 % des fils restent entiers)
     → VectorStore.add()          bge-m3-8k (Ollama) → table devportal_knowledge (pgvector)
 
@@ -79,6 +78,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - *garbage in, garbage out* : l'extraction est souvent la partie la plus difficile d'un RAG ;
   - tout le texte n'est pas bon à indexer : un sommaire contient tous les mots-clés du livre et aucune réponse, il remonte donc pour beaucoup de questions et prend la place de vrais passages ;
   - le PDF est un format d'impression, pas un format structuré : convertir en Markdown, ou repartir de la source, est souvent plus robuste.
+- **Suite** : le code de cette première phase (`ingestPdf`, `TextCleanerTransformer`, la dépendance au lecteur PDF) a été supprimé le 2026-11-17, lors de la réorganisation des packages par fonctionnalité. Il reste dans l'historique Git.
 
 ### E2 — Le squelette de bout en bout (2026-10-25)
 
@@ -419,7 +419,7 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 
 1. **Mesurer le bruit de formulation** : ajouter une ou deux reformulations françaises par question, écrites sans connaître les fils de référence (par exemple par un LLM), et observer la variation des rangs (E14). Permet de savoir quel écart est significatif avant de juger les expériences suivantes.
 2. **Reranking** : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
-3. **Recherche hybride** : à reprendre seulement après avoir ajouté au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
+3. **Recherche hybride** : en cours sur la branche `feature/hybrid-search`, pour apprendre la technique (fusion RRF faite). Le banc actuel ne devrait pas montrer de gain (E13) : il faut d'abord ajouter au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
 4. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI), chercher avec chacune, puis fusionner. Cible : le décalage de vocabulaire (E7) et la sensibilité à la formulation (E14, plafond optimiste de 80 % de Hit@10). Attention à l'effet observé en E13 avec les synonymes.
 5. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
 6. **Ajuster la consigne sur les dates** (E10).

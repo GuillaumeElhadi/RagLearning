@@ -2,7 +2,7 @@
 
 Projet d'apprentissage : construire un RAG (*Retrieval-Augmented Generation*) de A à Z avec Spring AI.
 
-Le RAG répond aux questions de support sur le Developer Portal (API management avec Kong et Ping Identity) à partir de l'**historique anonymisé d'un canal Slack de support** : chaque fil (question, échanges, résolution) devient un document. Une première phase a porté sur un livre PDF ; ce code est conservé mais n'est plus branché.
+Le RAG répond aux questions de support sur le Developer Portal (API management avec Kong et Ping Identity) à partir de l'**historique anonymisé d'un canal Slack de support** : chaque fil (question, échanges, résolution) devient un document. Une première phase a porté sur un livre PDF ; ce code a été retiré, ses leçons restent dans le journal (E1).
 
 Le **pourquoi** de chaque choix, les expériences menées et leurs mesures sont dans le [journal d'expérimentation](docs/rag-journal.md). Ce README décrit **comment le projet fonctionne**.
 
@@ -30,6 +30,23 @@ REQUÊTE (à chaque question)
 | LLM (« l'élève qui répond ») | Anthropic Claude Haiku 5.5 | Rédige la réponse à partir du texte des fils retrouvés |
 
 Le modèle d'embedding et le LLM sont **indépendants** : Claude ne voit jamais les vecteurs, seulement le texte des fils retrouvés.
+
+## Organisation du code
+
+Le code est regroupé **par fonctionnalité**, un dossier par étape du RAG, et non par type de classe : ce qui change ensemble vit ensemble.
+
+```
+fr.elhadi.raglearning
+ ├─ ingestion/    RagIngestorService, CommandLineIngestor : charge l'export Slack dans la base
+ │   └─ slack/    lecture, nettoyage, anonymisation et classification des fils ; modèle de l'export
+ ├─ retrieval/    RetrievalService, RetrievedChunk : retrouve les fils pertinents
+ │                ReciprocalRankFusion : fusion de classements (RRF), pas encore branchée
+ ├─ generation/   QuestionAnsweringService, ThreadContextFormatter : construit le contexte, appelle le LLM
+ ├─ api/          RagController : routes /rag/related-chunks et /rag/ask
+ └─ config/       BeansConfig : beans partagés (découpeur de texte, client de chat)
+```
+
+Les dépendances vont dans un seul sens : `api` utilise `generation` et `retrieval`, `generation` utilise `retrieval`, et `ingestion` est indépendante des trois autres (elle ne partage que la base). Les tests suivent la même arborescence ; les bancs d'évaluation sont dans `evaluation/`, car ils traversent plusieurs blocs.
 
 ## Prérequis
 
@@ -182,10 +199,6 @@ Ces règles ne peuvent pas reconnaître un nom ou un secret écrit en texte libr
 
 Les chunks reçoivent des **identifiants stables** et pgvector fait un **upsert** (`ON CONFLICT DO UPDATE`) : réingérer le même export ne crée pas de doublons. En revanche, si le découpage ou le nettoyage change, d'anciens chunks peuvent rester **orphelins**. D'où le `TRUNCATE devportal_knowledge` avant chaque réingestion complète.
 
-### Première phase : un livre PDF
-
-`RagIngestorService.ingestPdf()` reste disponible (son appel est commenté dans `CommandLineIngestor`) : `ParagraphPdfDocumentReader` produit un document par entrée du **plan** du PDF (ses signets, pas la page « Sommaire »), puis `TextCleanerTransformer` nettoie le texte avant le découpage. Le lecteur lève une exception si le PDF n'a pas de plan ; utiliser alors `PagePdfDocumentReader`. Voir aussi [Problèmes connus à l'ingestion des PDF](#problèmes-connus-à-lingestion-des-pdf).
-
 ## Le modèle de données
 
 Spring AI crée la table `devportal_knowledge`, avec **une ligne par chunk** :
@@ -314,27 +327,6 @@ Pour voir le SQL exécuté par Spring, activer temporairement `logging.level.org
 - **Préférer un échec bruyant à une perte silencieuse** : `truncate=false` plutôt qu'une troncature invisible.
 - **La référence pour les propriétés d'une bibliothèque Spring est son catalogue** (`META-INF/spring-configuration-metadata.json` dans le JAR, celui qu'utilise l'autocomplétion d'IntelliJ), pas la documentation : une propriété documentée mais absente du catalogue peut être ignorée sans avertissement.
 
-## Problèmes connus à l'ingestion des PDF
-
-Aucun n'est bloquant (l'ingestion va au bout), mais les deux premiers dégradent la **qualité des chunks**. Un RAG ne retrouve pas ce que l'extraction a abîmé : *garbage in, garbage out*.
-
-| Message | Cause | Conséquence |
-|---------|-------|-------------|
-| `ERROR ForkPDFLayoutTextStripper : Error sorting text positions` / `Comparison method violates its general contract!` | Bug de Spring AI : sa règle de tri des fragments de texte n'est pas cohérente sur certaines mises en page, et le tri Java abandonne. L'exception est rattrapée. | Sur les pages concernées, le texte peut être dans le désordre. |
-| `WARN PDType0Font : No Unicode mapping for CID+... in font CambriaMath` | Les formules mathématiques du PDF sont stockées comme des glyphes sans table de correspondance vers des caractères. | Formules perdues ou caractères illisibles dans le `content`. Aucun réglage de PDFBox ne les récupère. |
-| Beaucoup d'espaces et de sauts de ligne dans le `content` | Le *Layout*TextStripper imite la mise en page visuelle avec des espaces et des retours à la ligne. | Tokens gaspillés (des sections courtes donnent 2 chunks) et sens dilué dans les vecteurs. |
-| `WARNING: A restricted method in java.lang.System has been called` | Netty charge du code natif sans autorisation explicite (Java récent). | Aucune. Option JVM indiquée dans le message pour le faire taire. |
-| `ERROR DnsServerAddressStreamProviders : Unable to load ...MacOSDnsServerAddressStreamProvider` | Résolveur DNS natif macOS de Netty absent du classpath ; repli sur le résolveur par défaut. | Aucune pour des appels à `localhost`. |
-
-**Pistes pour les formules illisibles**, de la plus simple à la plus lourde :
-
-1. Supprimer les caractères irrécupérables (zone d'usage privé Unicode `\p{Co}`, caractère de remplacement `�`) pour qu'ils ne polluent pas les vecteurs.
-2. Ingérer la **source** du PDF (Word, LaTeX, HTML) quand elle existe.
-3. Faire retranscrire les pages concernées par un **modèle multimodal** (image de la page → Markdown + LaTeX), en ne traitant que les pages signalées par les warnings.
-4. Des outils spécialisés d'analyse de documents (souvent en Python).
-
-Les messages PDFBox peuvent être réduits avec `logging.level.org.apache.pdfbox.pdmodel.font=ERROR`.
-
 ## Évaluer le RAG
 
 Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il **retrouve les bons mais répond mal**. On les teste séparément, en commençant par la recherche.
@@ -374,7 +366,7 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 
 - [x] Infrastructure : PostgreSQL + pgvector via Docker Compose
 - [x] Configuration Spring AI : datasource, Ollama, pgvector, Anthropic
-- [x] Ingestion d'un PDF (première phase)
+- [x] Première phase sur un livre PDF (code retiré, leçons dans E1)
 - [x] Ingestion de l'historique Slack : un document par fil, découpage à 1500 tokens
 - [x] Contexte effectif d'Ollama porté à 8192 tokens (`bge-m3-8k`)
 - [x] Ingestion désactivable et idempotente
@@ -384,8 +376,10 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 - [x] Banc d'évaluation de la recherche (Hit@5, Hit@10, MRR)
 - [x] Exploration de la recherche par mots-clés : hypothèse réfutée (E13)
 - [x] Questions d'évaluation en français et en anglais : pas d'effet de langue moyen, forte sensibilité à la formulation (E14)
+- [x] Code réorganisé par fonctionnalité (`ingestion`, `retrieval`, `generation`, `api`)
 - [ ] Mesure du bruit de formulation (reformulations dans la même langue)
 - [ ] Reranking des 30 premiers candidats
+- [ ] Recherche hybride (en cours sur la branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF faite ; restent la recherche par mots-clés, l'extraction de mots-clés et l'assemblage avec la recherche dense
 - [ ] Évaluation de la génération
 - [ ] Refactoring en architecture hexagonale
 - [ ] Comparaison avec l'advisor Spring AI (`QuestionAnswerAdvisor`)
