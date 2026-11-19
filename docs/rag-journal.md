@@ -344,6 +344,41 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - les reformulations doivent être écrites **sans connaître les fils de référence** (par exemple par un LLM qui ne voit que la question d'origine), sinon leur vocabulaire s'y glisse ;
   - une anonymisation qui remplace des valeurs différentes par le même masque peut effacer l'information qui rend un document pertinent.
 
+### E15 — Recherche par mots-clés classée par fil : `KeywordSearchService` (2026-11-19)
+
+- **Constat** : E13 a montré en SQL qu'une recherche par mots-clés ne bat pas la recherche dense sur le jeu actuel, faute de termes rares. Mais la technique hybride reste à apprendre, et la fusion (RRF) a besoin d'un second classement de **fils**.
+- **Hypothèse** : le score de E13 (somme des IDF des mots trouvés), appliqué au meilleur chunk de chaque fil, peut être écrit en **une seule requête**, testée sur un vrai PostgreSQL, et rester déterministe pour que la fusion puisse s'appuyer dessus.
+- **Changement** (aucune mesure du banc : la recherche n'est pas encore branchée) :
+  - `KeywordSearchService.searchByKeywords(keywords, limit)` retourne des identifiants de fils classés ;
+  - développée en TDD, avec `KeywordSearchServiceTest` sur **Testcontainers** (image `pgvector/pgvector:pg18-trixie`, tables créées dans le test, sans la base de l'application), organisée en ZOMBIES (zéro, un, plusieurs mots-clés ; limites ; erreurs) ;
+  - le `README` décrit le comportement, la Javadoc du service décrit la requête.
+- **La requête, étape par étape** (un bloc `WITH` par étape) :
+  1. `keywords` : Java nettoie les mots (minuscules, lettres et chiffres Unicode seulement, sans doublon) et les joint par des espaces. `string_to_array(:keywords, ' ')` puis `unnest` donnent une ligne par mot. Un seul paramètre texte suffit : comme les mots sont nettoyés, aucun ne contient d'espace ;
+  2. `corpus` : `count(*)` des chunks, le « N » de l'IDF ;
+  3. `word_idf` : `ts_stat` parcourt tous les `tsvector` de la base et renvoie, pour chaque mot, `ndoc`, le nombre de chunks qui le contiennent. On ne garde que les mots-clés et on calcule `ln(N / ndoc)`. Un mot-clé absent de la base disparaît ici : il ne peut ni matcher ni compter ;
+  4. `chunk_scores` : chaque chunk est joint aux mots-clés qu'il contient (`to_tsvector('simple', content) @@ plainto_tsquery('simple', mot)`). La jointure remplace le OU : un chunk sans aucun mot-clé n'a aucune ligne. Le `GROUP BY d.id` additionne les IDF des mots d'un même chunk ; le filtre `responderReplyCount > 0` est ici ;
+  5. requête finale : `GROUP BY thread_id` garde le **meilleur chunk** de chaque fil (`max(score)`), puis `ORDER BY` score décroissant, date décroissante, `thread_id` croissant, et enfin `LIMIT`. Le `LIMIT` s'applique **après** le regroupement : il compte des fils.
+- **Décisions de conception** :
+  - **meilleur chunk plutôt que somme des chunks** : un fil découpé en dix chunks ne doit pas gagner parce qu'il est long. Comparer plus tard avec les mots distincts du fil entier ;
+  - **IDF en `numeric`** : même problème que pour la RRF. L'addition de `double` dépend de l'ordre, et deux fils mathématiquement à égalité pouvaient différer d'un bit, rendant le départage par la date inopérant. `numeric` est exact pour l'addition ;
+  - **date puis `threadId`** pour départager : l'ordre ne doit jamais dépendre de l'ordre physique des lignes en base ;
+  - **un mot présent partout vaut 0** (`ln(N/N)`) : il ne distingue rien mais reste un résultat valable, donc on ne filtre pas sur `score > 0` ;
+  - **paramètres liés** : les mots ne sont jamais concaténés au SQL ; le seul texte SQL fourni à `ts_stat` est une constante.
+- **Pièges rencontrés** :
+  - `JdbcClient.sql(...)` ne fait **rien** sans terminaison (`.update()`, `.query(...).list()`) : les premiers tests passaient alors que la table n'existait pas ;
+  - un paramètre nommé ne peut remplacer qu'une valeur entière, jamais un morceau d'un littéral : `'{"threadId": :threadId}'` n'est pas substitué. On construit le JSON avec `json_build_object` ;
+  - les antislashs d'une regex Java s'écrivent `\\p{L}` dans le code, pas `\\\\p{L}` : avec quatre, la classe exclut les lettres `p`, `L`, `N` et efface tous les mots ;
+  - un `distinct()` en Java **après** un `LIMIT` SQL donne moins de résultats que demandé : le dédoublonnage doit précéder la limite, donc se faire dans la requête ;
+  - un test qui passe d'emblée ne prouve rien : il faut voir chaque test **rouge pour la bonne raison** avant d'écrire le code (le test « plusieurs mots-clés sur le même chunk » ne peut pas être rouge, c'est un test de caractérisation).
+- **Limites connues** :
+  - `ts_stat` recalcule les `tsvector` de **tout** le corpus à chaque appel, et la recherche calcule `to_tsvector` sur chaque chunk : acceptable pour un apprentissage, à remplacer par une colonne `tsvector` indexée (GIN) et des IDF précalculés ;
+  - les mots composés sont écrasés (`api-key` devient `apikey`), donc l'extracteur de mots-clés devra produire des mots simples ;
+  - l'IDF mesure la rareté, pas la pertinence (E13).
+- **Leçons** :
+  - une recherche secondaire doit rendre un classement **déterministe** : la fusion et les tests en dépendent ;
+  - un classement par fil se pense en deux niveaux (score du chunk, puis agrégation par fil), et la limite se place après le second ;
+  - tester le SQL sur la vraie base (Testcontainers) évite de simuler ce qui fait justement la valeur de la requête.
+
 ---
 
 ## 3. Historique des mesures
@@ -354,6 +389,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 | 2026-11-15 | + filtre `responderReplyCount > 0`, nettoyage avant anonymisation, `[HOST]` et `[IP]` (E12) | 60 % | 70 % | 0,457 |
 | 2026-11-15 | inchangé : recherche par mots-clés explorée en SQL, non intégrée (E13) | 60 % | 70 % | 0,457 |
 | 2026-11-17 | même configuration, questions traduites en anglais (E14, colonne EN) | 60 % | 70 % | 0,453 |
+| 2026-11-19 | inchangé : recherche par mots-clés classée par fil, non branchée sur le banc (E15) | 60 % | 70 % | 0,453 |
 
 ---
 
@@ -419,7 +455,7 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 
 1. **Mesurer le bruit de formulation** : ajouter une ou deux reformulations françaises par question, écrites sans connaître les fils de référence (par exemple par un LLM), et observer la variation des rangs (E14). Permet de savoir quel écart est significatif avant de juger les expériences suivantes.
 2. **Reranking** : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
-3. **Recherche hybride** : en cours sur la branche `feature/hybrid-search`, pour apprendre la technique (fusion RRF faite). Le banc actuel ne devrait pas montrer de gain (E13) : il faut d'abord ajouter au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
+3. **Recherche hybride** : en cours sur la branche `feature/hybrid-search`, pour apprendre la technique (fusion RRF et recherche par mots-clés classée par fil faites, E15 ; restent l'extraction de mots-clés, l'assemblage et la comparaison dense / hybride). Le banc actuel ne devrait pas montrer de gain (E13) : il faut d'abord ajouter au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
 4. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI), chercher avec chacune, puis fusionner. Cible : le décalage de vocabulaire (E7) et la sensibilité à la formulation (E14, plafond optimiste de 80 % de Hit@10). Attention à l'effet observé en E13 avec les synonymes.
 5. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
 6. **Ajuster la consigne sur les dates** (E10).

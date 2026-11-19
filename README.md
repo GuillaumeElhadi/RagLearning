@@ -41,6 +41,7 @@ fr.elhadi.raglearning
  │   └─ slack/    lecture, nettoyage, anonymisation et classification des fils ; modèle de l'export
  ├─ retrieval/    RetrievalService, RetrievedChunk : retrouve les fils pertinents
  │                ReciprocalRankFusion : fusion de classements (RRF), pas encore branchée
+ │                KeywordSearchService : recherche par mots-clés classée par fil, pas encore branchée
  ├─ generation/   QuestionAnsweringService, ThreadContextFormatter : construit le contexte, appelle le LLM
  ├─ api/          RagController : routes /rag/related-chunks et /rag/ask
  └─ config/       BeansConfig : beans partagés (découpeur de texte, client de chat)
@@ -346,6 +347,27 @@ Mesure actuelle : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 
 
 ⚠️ Ne jamais reprendre une question du jeu comme exemple dans un prompt : on ajusterait le système au jeu d'évaluation (sur-apprentissage), et les mesures ne vaudraient plus rien.
 
+### Recherche par mots-clés (brique de la recherche hybride, E15)
+
+`KeywordSearchService.searchByKeywords(keywords, limit)` est la seconde recherche de la recherche hybride : elle retourne des **identifiants de fils** classés, qui seront fusionnés avec ceux de la recherche dense par `ReciprocalRankFusion`. Elle n'est pas encore branchée sur `/rag/related-chunks` ni sur le banc d'évaluation.
+
+Comportement :
+
+- les mots-clés sont normalisés (minuscules, lettres et chiffres seulement, sans doublon) et passés à la base comme **paramètre**, jamais concaténés au SQL ;
+- un chunk est retenu s'il contient **au moins un** mot-clé (OU) ;
+- chaque mot vaut son **IDF** (`ln(nombre de chunks / chunks contenant le mot)`), calculé par `ts_stat` : un mot rare pèse plus qu'un mot fréquent ;
+- le score d'un fil est celui de son **meilleur chunk** (somme des IDF des mots-clés qu'il contient) ;
+- tri par score, puis par date décroissante, puis par identifiant : l'ordre est déterministe ;
+- seuls les fils avec `responderReplyCount > 0` sont retournés ; `limit` compte des **fils**, pas des chunks.
+
+La requête SQL est expliquée pas à pas dans la Javadoc du service et dans le [journal](docs/rag-journal.md) (E15).
+
+Ses tests (`KeywordSearchServiceTest`) tournent sur un vrai PostgreSQL avec pgvector lancé par **Testcontainers** : Docker (Colima sur Mac) doit donc être démarré, et la base de l'application n'est pas utilisée.
+
+```bash
+./mvnw test -Dtest=KeywordSearchServiceTest
+```
+
 ### Exploration : extraction de mots-clés (E13)
 
 `KeywordExtractionExplorationTest` affiche les mots-clés qu'un LLM extrait de chaque question du jeu, avec le prompt `src/main/resources/prompts/keyword-extraction.st`. Il a servi à explorer la recherche par mots-clés, dont l'hypothèse a été réfutée (voir E13). Il appelle Anthropic : `ANTHROPIC_API_KEY` doit être définie dans l'environnement.
@@ -379,7 +401,7 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 - [x] Code réorganisé par fonctionnalité (`ingestion`, `retrieval`, `generation`, `api`)
 - [ ] Mesure du bruit de formulation (reformulations dans la même langue)
 - [ ] Reranking des 30 premiers candidats
-- [ ] Recherche hybride (en cours sur la branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF faite ; restent la recherche par mots-clés, l'extraction de mots-clés et l'assemblage avec la recherche dense
+- [ ] Recherche hybride (en cours sur la branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF et recherche par mots-clés faites (E15) ; restent l'extraction de mots-clés par un LLM et l'assemblage avec la recherche dense
 - [ ] Évaluation de la génération
 - [ ] Refactoring en architecture hexagonale
 - [ ] Comparaison avec l'advisor Spring AI (`QuestionAnswerAdvisor`)
