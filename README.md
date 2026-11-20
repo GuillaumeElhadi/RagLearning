@@ -343,10 +343,10 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il 
   - les **mots-clés extraits** par le LLM pour chaque formulation (l'extraction n'est pas déterministe : ils expliquent un écart de rang, et un petit écart peut n'être que du bruit). Le test espionne `KeywordExtractor` (`@MockitoSpyBean`) pour les noter sans changer son comportement. Il lance un appel au LLM par formulation : `ANTHROPIC_API_KEY` doit être définie.
 - **Lancement** (il interroge la vraie base et Ollama, d'où la variable qui l'active) :
   ```bash
-  RAG_EVALUATION=true ./mvnw test -Dtest=RetrievalEvaluationTest
+  RAG_EVALUATION=true RAG_EVALUATION_RUNS=5 ./mvnw test -Dtest=RetrievalEvaluationTest
   ```
 
-Mesure actuelle, recherche dense seule : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. Recherche hybride (dense + mots-clés, RRF), une seule exécution : 80 %, 90 %, 0,560 en français ; 70 %, 80 %, 0,419 en anglais, soit un gain net en français et un bilan mitigé en anglais (voir E17). L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
+Mesure actuelle, recherche dense seule : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. Recherche hybride (dense + mots-clés, RRF), une seule exécution : 80 %, 90 %, 0,560 en français ; 70 %, 80 %, 0,419 en anglais, soit un gain net en français et un bilan mitigé en anglais (voir E17). Moyenne de 5 exécutions (E18) : 72 %, 88 %, MRR 0,467 en français ; 54 %, 80 %, MRR 0,391 en anglais. L'hybride gagne en Hit@10 en français mais pas en MRR, et son MRR varie de 0,1 à 0,2 d'une exécution à l'autre : le 0,560 d'E17 était une exécution favorable. L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
 
 ⚠️ Ne jamais reprendre une question du jeu comme exemple dans un prompt : on ajusterait le système au jeu d'évaluation (sur-apprentissage), et les mesures ne vaudraient plus rien.
 
