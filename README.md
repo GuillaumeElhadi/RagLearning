@@ -40,7 +40,7 @@ fr.elhadi.raglearning
  ├─ ingestion/    RagIngestorService, CommandLineIngestor : charge l'export Slack dans la base
  │   └─ slack/    lecture, nettoyage, anonymisation et classification des fils ; modèle de l'export
  ├─ retrieval/    RetrievalService, RetrievedChunk : retrouve les fils pertinents
- │   │            ReciprocalRankFusion : fusion de classements (RRF)
+ │   │            ReciprocalRankFusion : fusion de classements (RRF), avec poids par classement
  │   │            HybridRetrievalService : recherche dense + mots-clés, fusion RRF ; rend des fils, pas encore branchée sur l'API
  │   └─ keyword/  KeywordSearchService : recherche par mots-clés classée par fil
  │                KeywordExtractor : extrait les mots-clés d'une question avec un LLM, puis les nettoie
@@ -337,7 +337,7 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il 
 ### Le banc d'évaluation de la recherche
 
 - **Jeu d'évaluation** : `src/test/resources/evaluation/retrieval-questions.json`, 10 questions réelles, chacune avec ses formulations par langue (`"variants": {"fr": […], "en": […]}`) et le ou les fils de référence (`expectedThreadIds`) vérifiés à la main. Les traductions anglaises sont fidèles, sans vocabulaire tiré des fils.
-- **Test** : `RetrievalEvaluationTest` interroge **deux recherches** à la même profondeur de 30, la recherche **dense** seule et la recherche **hybride** (dense + mots-clés, fusion RRF), classe les résultats par fil distinct, puis affiche, **pour chaque langue et chaque recherche**, le rang de la première référence pour chaque question (le pire rang si une langue a plusieurs formulations), ainsi que :
+- **Test** : `RetrievalEvaluationTest` interroge **quatre recherches** à la même profondeur de 30 : la recherche **dense** seule et la recherche **hybride** (dense + mots-clés, fusion RRF) avec trois pondérations dense:mots-clés (1:1, 2:1, 4:1) qui partagent les mêmes mots-clés au sein d'une exécution, classe les résultats par fil distinct, puis affiche, **pour chaque langue et chaque recherche**, le rang de la première référence pour chaque question (le pire rang si une langue a plusieurs formulations), ainsi que :
   - **Hit@5** et **Hit@10** : part des questions dont une référence est dans les 5 (ou 10) premiers fils ;
   - **MRR** : moyenne de 1/rang de la première référence ;
   - les **mots-clés extraits** par le LLM pour chaque formulation (l'extraction n'est pas déterministe : ils expliquent un écart de rang, et un petit écart peut n'être que du bruit). Le test espionne `KeywordExtractor` (`@MockitoSpyBean`) pour les noter sans changer son comportement. Il lance un appel au LLM par formulation : `ANTHROPIC_API_KEY` doit être définie.
@@ -346,7 +346,7 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il 
   RAG_EVALUATION=true RAG_EVALUATION_RUNS=5 ./mvnw test -Dtest=RetrievalEvaluationTest
   ```
 
-Mesure actuelle, recherche dense seule : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. Recherche hybride (dense + mots-clés, RRF), une seule exécution : 80 %, 90 %, 0,560 en français ; 70 %, 80 %, 0,419 en anglais, soit un gain net en français et un bilan mitigé en anglais (voir E17). Moyenne de 5 exécutions (E18) : 72 %, 88 %, MRR 0,467 en français ; 54 %, 80 %, MRR 0,391 en anglais. L'hybride gagne en Hit@10 en français mais pas en MRR, et son MRR varie de 0,1 à 0,2 d'une exécution à l'autre : le 0,560 d'E17 était une exécution favorable. L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
+Mesure actuelle, recherche dense seule : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. Recherche hybride (dense + mots-clés, RRF), une seule exécution : 80 %, 90 %, 0,560 en français ; 70 %, 80 %, 0,419 en anglais, soit un gain net en français et un bilan mitigé en anglais (voir E17). Moyenne de 5 exécutions (E18) : 72 %, 88 %, MRR 0,467 en français ; 54 %, 80 %, MRR 0,391 en anglais. L'hybride gagne en Hit@10 en français mais pas en MRR, et son MRR varie de 0,1 à 0,2 d'une exécution à l'autre : le 0,560 d'E17 était une exécution favorable. En pondérant la dense (E19), le MRR monte à 0,531 en français et 0,433 en anglais avec un rapport 4:1 (contre 0,475 et 0,380 à égalité), au prix de la question 10 ; ce réglage n'est pas le défaut du code et reste à valider sur des questions à terme rare. L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
 
 ⚠️ Ne jamais reprendre une question du jeu comme exemple dans un prompt : on ajusterait le système au jeu d'évaluation (sur-apprentissage), et les mesures ne vaudraient plus rien.
 
