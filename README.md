@@ -40,8 +40,9 @@ fr.elhadi.raglearning
  ├─ ingestion/    RagIngestorService, CommandLineIngestor : charge l'export Slack dans la base
  │   └─ slack/    lecture, nettoyage, anonymisation et classification des fils ; modèle de l'export
  ├─ retrieval/    RetrievalService, RetrievedChunk : retrouve les fils pertinents
- │                ReciprocalRankFusion : fusion de classements (RRF), pas encore branchée
- │                KeywordSearchService : recherche par mots-clés classée par fil, pas encore branchée
+ │   │            ReciprocalRankFusion : fusion de classements (RRF), pas encore branchée
+ │   └─ keyword/  KeywordSearchService : recherche par mots-clés classée par fil, pas encore branchée
+ │                KeywordExtractor : extrait les mots-clés d'une question avec un LLM (nettoyage fait, appel au LLM à venir)
  ├─ generation/   QuestionAnsweringService, ThreadContextFormatter : construit le contexte, appelle le LLM
  ├─ api/          RagController : routes /rag/related-chunks et /rag/ask
  └─ config/       BeansConfig : beans partagés (découpeur de texte, client de chat)
@@ -353,7 +354,7 @@ Mesure actuelle : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 
 
 Comportement :
 
-- les mots-clés sont normalisés (minuscules, lettres et chiffres seulement, sans doublon) et passés à la base comme **paramètre**, jamais concaténés au SQL ;
+- les mots-clés sont découpés comme la base découpe le texte (minuscules, coupure sur tout ce qui n'est pas lettre ou chiffre : `api-key` donne `api` et `key`), dédoublonnés **après** le découpage, et passés à la base comme **paramètre**, jamais concaténés au SQL ;
 - un chunk est retenu s'il contient **au moins un** mot-clé (OU) ;
 - chaque mot vaut son **IDF** (`ln(nombre de chunks / chunks contenant le mot)`), calculé par `ts_stat` : un mot rare pèse plus qu'un mot fréquent ;
 - le score d'un fil est celui de son **meilleur chunk** (somme des IDF des mots-clés qu'il contient) ;
@@ -361,6 +362,8 @@ Comportement :
 - seuls les fils avec `responderReplyCount > 0` sont retournés ; `limit` compte des **fils**, pas des chunks.
 
 La requête SQL est expliquée pas à pas dans la Javadoc du service et dans le [journal](docs/rag-journal.md) (E15).
+
+`KeywordExtractor` prépare les mots-clés à partir de la question. Il sépare deux rôles : le LLM propose des mots (à venir), puis `normalize` applique une politique **déterministe** (retire les mots qui tombent sur les masques d'anonymisation `ip`, `host`, `uuid`, `redacted`, ignore les vides, plafonne à 8 mots). Le découpage des mots composés n'est **pas** dans l'extracteur : il est dans le service de recherche, qui doit tokeniser comme la base (voir E16). `normalize` est une fonction pure testée sans mock (`KeywordExtractorTest`).
 
 Ses tests (`KeywordSearchServiceTest`) tournent sur un vrai PostgreSQL avec pgvector lancé par **Testcontainers** : Docker (Colima sur Mac) doit donc être démarré, et la base de l'application n'est pas utilisée.
 
@@ -401,7 +404,7 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 - [x] Code réorganisé par fonctionnalité (`ingestion`, `retrieval`, `generation`, `api`)
 - [ ] Mesure du bruit de formulation (reformulations dans la même langue)
 - [ ] Reranking des 30 premiers candidats
-- [ ] Recherche hybride (en cours sur la branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF et recherche par mots-clés faites (E15) ; restent l'extraction de mots-clés par un LLM et l'assemblage avec la recherche dense
+- [ ] Recherche hybride (en cours sur la branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF et recherche par mots-clés faites (E15), nettoyage des mots-clés extraits fait (E16) ; restent l'appel au LLM de l'extracteur et l'assemblage avec la recherche dense
 - [ ] Évaluation de la génération
 - [ ] Refactoring en architecture hexagonale
 - [ ] Comparaison avec l'advisor Spring AI (`QuestionAnswerAdvisor`)

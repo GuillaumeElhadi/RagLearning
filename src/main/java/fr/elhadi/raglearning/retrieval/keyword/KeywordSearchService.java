@@ -1,5 +1,6 @@
-package fr.elhadi.raglearning.retrieval;
+package fr.elhadi.raglearning.retrieval.keyword;
 
+import fr.elhadi.raglearning.retrieval.ReciprocalRankFusion;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
@@ -8,6 +9,7 @@ import org.springframework.util.StringUtils;
 
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /**
  * Recherche par mots-clés (plein texte PostgreSQL) sur les chunks de la base, avec un
@@ -90,17 +92,24 @@ public class KeywordSearchService {
     /**
      * Cherche les fils contenant au moins un des mots-clés et les classe par pertinence.
      *
-     * <p>Les mots-clés sont normalisés avant la recherche : mis en minuscules, privés de tout
-     * caractère qui n'est pas une lettre ou un chiffre (un mot-clé comme {@code api-key}
-     * devient donc {@code apikey}), puis dédoublonnés ; les mots vides sont ignorés. Ils sont
+     * <p>Les mots-clés sont découpés comme la base découpe le texte indexé : mis en minuscules,
+     * puis coupés sur tout caractère qui n'est ni une lettre ni un chiffre (un mot-clé comme
+     * {@code api-key} donne les mots {@code api} et {@code key}, de même que {@code "api key"}).
+     * Les mots obtenus sont dédoublonnés <em>après</em> le découpage, pour qu'un mot présent
+     * deux fois ne pèse pas deux fois dans le score ; les mots vides sont ignorés. Ils sont
      * transmis à la base comme <em>paramètre</em> et jamais concaténés au SQL, ce qui exclut
      * toute injection.
      *
-     * @param keywords mots-clés simples, un mot par élément ; {@code null} ou vide donne une liste vide
-     * @param limit nombre maximal de <em>fils</em> retournés (et non de chunks), strictement positif
+     * @param keywords
+     *     mots-clés simples, un mot par élément ; {@code null} ou vide donne une liste vide
+     * @param limit
+     *     nombre maximal de <em>fils</em> retournés (et non de chunks), strictement positif
+     *
      * @return identifiants de fils (threadId) du plus pertinent au moins pertinent, sans doublon ;
-     *         liste vide si rien ne correspond
-     * @throws IllegalArgumentException si {@code limit} est inférieur ou égal à zéro
+     *     liste vide si rien ne correspond
+     *
+     * @throws IllegalArgumentException
+     *     si {@code limit} est inférieur ou égal à zéro
      */
     public List<String> searchByKeywords(final List<String> keywords, final int limit) {
         if (limit <= 0) {
@@ -113,7 +122,8 @@ public class KeywordSearchService {
 
         final String cleanedKeywords = keywords.stream()
                                                .map(String::toLowerCase)
-                                               .map(keyword -> keyword.replaceAll("[^\\p{L}\\p{N}]", ""))
+                                               .map(keyword -> keyword.replaceAll("[^\\p{L}\\p{N}]", " "))
+                                               .flatMap(keyword -> Stream.of(keyword.split("\\s+")))
                                                .filter(keyword -> !keyword.isEmpty())
                                                .distinct()
                                                .collect(Collectors.joining(" "));

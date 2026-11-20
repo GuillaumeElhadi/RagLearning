@@ -1,4 +1,4 @@
-package fr.elhadi.raglearning.retrieval;
+package fr.elhadi.raglearning.retrieval.keyword;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -121,6 +121,36 @@ class KeywordSearchServiceTest {
             insertChunk("thread-2", "unrelated chunk");
             assertThat(keywordSearchService.searchByKeywords(List.of("Paramètre"), 60)).containsExactly("thread-1");
         }
+
+        @Test
+        void shouldSplitHyphenatedKeywordIntoWords() {
+            insertChunk("thread-1", "The key is invalid");
+            insertChunk("thread-2", "unrelated chunk");
+
+            final List<String> actual = keywordSearchService.searchByKeywords(List.of("api-key"), 60);
+
+            assertThat(actual).containsExactly("thread-1");
+        }
+
+        @Test
+        void shouldSplitKeywordContainingASpaceIntoWords() {
+            insertChunk("thread-1", "The limit is reached");
+            insertChunk("thread-2", "unrelated chunk");
+
+            final List<String> actual = keywordSearchService.searchByKeywords(List.of("rate limit"), 60);
+
+            assertThat(actual).containsExactly("thread-1");
+        }
+
+        @Test
+        void shouldSplitKeywordOnAnyPunctuation() {
+            insertChunk("thread-1", "The gateway answers 504");
+            insertChunk("thread-2", "unrelated chunk");
+
+            final List<String> actual = keywordSearchService.searchByKeywords(List.of("error:504/timeout"), 60);
+
+            assertThat(actual).containsExactly("thread-1");
+        }
     }
 
     @Nested
@@ -176,6 +206,20 @@ class KeywordSearchServiceTest {
             final List<String> actual = keywordSearchService.searchByKeywords(List.of("zorglub", "blorp"), 60);
 
             assertThat(actual).isEmpty();
+        }
+
+        @Test
+        void shouldNotCountTwiceAWordRepeatedAfterSplittingKeywords() {
+            // "api-key" et "key" contiennent tous deux "key" : le mot ne doit peser qu'une fois.
+            // Les deux fils ont le même score s'il est compté une fois ; thread-1 passe alors
+            // devant par son identifiant. Compté deux fois, thread-2 le dépasserait.
+            insertChunk("thread-1", "api gateway");
+            insertChunk("thread-2", "key gateway");
+            insertChunk("thread-3", "unrelated chunk");
+
+            final List<String> actual = keywordSearchService.searchByKeywords(List.of("api-key", "key"), 60);
+
+            assertThat(actual).containsExactly("thread-1", "thread-2");
         }
 
         @Test

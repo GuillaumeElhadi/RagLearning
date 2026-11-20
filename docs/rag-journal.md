@@ -353,7 +353,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - développée en TDD, avec `KeywordSearchServiceTest` sur **Testcontainers** (image `pgvector/pgvector:pg18-trixie`, tables créées dans le test, sans la base de l'application), organisée en ZOMBIES (zéro, un, plusieurs mots-clés ; limites ; erreurs) ;
   - le `README` décrit le comportement, la Javadoc du service décrit la requête.
 - **La requête, étape par étape** (un bloc `WITH` par étape) :
-  1. `keywords` : Java nettoie les mots (minuscules, lettres et chiffres Unicode seulement, sans doublon) et les joint par des espaces. `string_to_array(:keywords, ' ')` puis `unnest` donnent une ligne par mot. Un seul paramètre texte suffit : comme les mots sont nettoyés, aucun ne contient d'espace ;
+  1. `keywords` : Java découpe les mots-clés (minuscules, coupure sur tout ce qui n'est ni lettre ni chiffre Unicode, dédoublonnage des mots obtenus, voir E16) et les joint par des espaces. `string_to_array(:keywords, ' ')` puis `unnest` donnent une ligne par mot. Un seul paramètre texte suffit : aucun mot ne contient d'espace ;
   2. `corpus` : `count(*)` des chunks, le « N » de l'IDF ;
   3. `word_idf` : `ts_stat` parcourt tous les `tsvector` de la base et renvoie, pour chaque mot, `ndoc`, le nombre de chunks qui le contiennent. On ne garde que les mots-clés et on calcule `ln(N / ndoc)`. Un mot-clé absent de la base disparaît ici : il ne peut ni matcher ni compter ;
   4. `chunk_scores` : chaque chunk est joint aux mots-clés qu'il contient (`to_tsvector('simple', content) @@ plainto_tsquery('simple', mot)`). La jointure remplace le OU : un chunk sans aucun mot-clé n'a aucune ligne. Le `GROUP BY d.id` additionne les IDF des mots d'un même chunk ; le filtre `responderReplyCount > 0` est ici ;
@@ -372,12 +372,33 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - un test qui passe d'emblée ne prouve rien : il faut voir chaque test **rouge pour la bonne raison** avant d'écrire le code (le test « plusieurs mots-clés sur le même chunk » ne peut pas être rouge, c'est un test de caractérisation).
 - **Limites connues** :
   - `ts_stat` recalcule les `tsvector` de **tout** le corpus à chaque appel, et la recherche calcule `to_tsvector` sur chaque chunk : acceptable pour un apprentissage, à remplacer par une colonne `tsvector` indexée (GIN) et des IDF précalculés ;
-  - les mots composés sont écrasés (`api-key` devient `apikey`), donc l'extracteur de mots-clés devra produire des mots simples ;
+  - dans la première version, les mots composés étaient écrasés (`api-key` devenait `apikey` et ne matchait plus rien, sans erreur) : corrigé en E16 ;
   - l'IDF mesure la rareté, pas la pertinence (E13).
 - **Leçons** :
   - une recherche secondaire doit rendre un classement **déterministe** : la fusion et les tests en dépendent ;
   - un classement par fil se pense en deux niveaux (score du chunk, puis agrégation par fil), et la limite se place après le second ;
   - tester le SQL sur la vraie base (Testcontainers) évite de simuler ce qui fait justement la valeur de la requête.
+
+### E16 — Extraire les mots-clés d'une question : qui nettoie quoi (2026-11-20, en cours)
+
+- **Constat** : E13 a montré deux défauts du LLM : des mots composés (`api-key`) malgré la consigne « un seul mot », et des mots qui tombent sur les masques d'anonymisation (`ip`, `host`, `uuid` correspondent à `[IP]`, `[HOST]`, `[UUID]`). Avec `KeywordSearchService`, un composé devenait `apikey` et ne matchait plus rien, sans erreur.
+- **Hypothèse** : une règle écrite dans le prompt n'est jamais garantie (le LLM a déjà ignoré « un seul mot ») ; ce qui doit être fiable se règle **en code**, dans des fonctions pures testables sans LLM.
+- **Changement** :
+  - **prompt** (`keyword-extraction.st`) : deux règles ajoutées (ne pas produire `ip`, `host`, `uuid`, `redacted`, et découper les composés) avec un exemple neutre, `rate-limit`, qui ne vient pas du jeu d'évaluation. Elles économisent des places dans les 3 à 8 mots, sans rien garantir ;
+  - **`KeywordSearchService`** : le découpage des composés se fait ici, pas dans l'extracteur. La base découpe elle-même le texte indexé ; découper les mots-clés de la même façon est de la tokenisation du moteur, et un seul endroit doit la connaître, quel que soit l'appelant. Le service coupe sur tout ce qui n'est ni lettre ni chiffre, puis dédoublonne **les mots** ;
+  - **`KeywordExtractor.normalize`** (fonction pure) : ignore les éléments vides ou `null`, écarte les mots de masque (comparés sans tenir compte de la casse), plafonne à 8 mots. Un mot écarté ne compte pas dans le plafond ;
+  - sous-package `retrieval/keyword/` pour les deux classes de la recherche par mots-clés.
+- **Mesure** : pas encore, l'appel au LLM (`extract`) n'est pas écrit. À faire ensuite avec `KeywordExtractionExplorationTest` : les mots obtenus sont-ils des mots simples, sans masque, en 3 à 8 ?
+- **Ce qui s'est passé en chemin** :
+  - la première répartition (découpage dans l'extracteur, nettoyage dans le service) dupliquait des règles et se contredisait (le service supprimait la ponctuation, l'extracteur la découpait). Voir où deux classes font la même chose est le signe qu'une responsabilité est mal placée ;
+  - on avait dit que le nettoyage du service protégeait de l'injection SQL. C'était faux : les mots sont des paramètres liés. Il sert à rendre les mots **comparables** à ceux de `ts_stat` ;
+  - `distinct()` avant le découpage laissait passer un mot en double (`["api-key", "key"]` donne `key` deux fois), qui comptait deux fois dans le score. Le dédoublonnage doit porter sur les mots finaux, pas sur les éléments d'entrée ;
+  - séparer l'appel au LLM d'une fonction pure `normalize` permet de tester la politique sans simulacre de `ChatClient`.
+- **Leçons** :
+  - **ne pas faire confiance à la sortie d'un LLM pour une règle qui doit être respectée** : la vérifier en code ;
+  - **isoler la partie non déterministe** (l'appel au modèle) derrière des fonctions pures testables ;
+  - la tokenisation d'une requête doit **imiter celle de l'index** ;
+  - dédoublonner à la fin d'une chaîne de transformations, pas au début.
 
 ---
 
@@ -390,6 +411,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 | 2026-11-15 | inchangé : recherche par mots-clés explorée en SQL, non intégrée (E13) | 60 % | 70 % | 0,457 |
 | 2026-11-17 | même configuration, questions traduites en anglais (E14, colonne EN) | 60 % | 70 % | 0,453 |
 | 2026-11-19 | inchangé : recherche par mots-clés classée par fil, non branchée sur le banc (E15) | 60 % | 70 % | 0,453 |
+| 2026-11-20 | inchangé : nettoyage des mots-clés extraits, non branché sur le banc (E16) | 60 % | 70 % | 0,453 |
 
 ---
 
@@ -455,7 +477,7 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 
 1. **Mesurer le bruit de formulation** : ajouter une ou deux reformulations françaises par question, écrites sans connaître les fils de référence (par exemple par un LLM), et observer la variation des rangs (E14). Permet de savoir quel écart est significatif avant de juger les expériences suivantes.
 2. **Reranking** : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
-3. **Recherche hybride** : en cours sur la branche `feature/hybrid-search`, pour apprendre la technique (fusion RRF et recherche par mots-clés classée par fil faites, E15 ; restent l'extraction de mots-clés, l'assemblage et la comparaison dense / hybride). Le banc actuel ne devrait pas montrer de gain (E13) : il faut d'abord ajouter au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
+3. **Recherche hybride** : en cours sur la branche `feature/hybrid-search`, pour apprendre la technique (fusion RRF, recherche par mots-clés classée par fil et nettoyage des mots-clés extraits faits, E15 et E16 ; restent l'appel au LLM de l'extracteur, l'assemblage et la comparaison dense / hybride). Le banc actuel ne devrait pas montrer de gain (E13) : il faut d'abord ajouter au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
 4. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI), chercher avec chacune, puis fusionner. Cible : le décalage de vocabulaire (E7) et la sensibilité à la formulation (E14, plafond optimiste de 80 % de Hit@10). Attention à l'effet observé en E13 avec les synonymes.
 5. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
 6. **Ajuster la consigne sur les dates** (E10).
