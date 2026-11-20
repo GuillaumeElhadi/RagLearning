@@ -1,6 +1,5 @@
 package fr.elhadi.raglearning.retrieval.keyword;
 
-import fr.elhadi.raglearning.retrieval.ReciprocalRankFusion;
 import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.simple.JdbcClient;
 import org.springframework.stereotype.Service;
@@ -15,7 +14,7 @@ import java.util.stream.Stream;
  * Recherche par mots-clés (plein texte PostgreSQL) sur les chunks de la base, avec un
  * classement par fil. C'est la seconde recherche de la recherche hybride : son résultat
  * est destiné à être fusionné avec celui de la recherche dense par
- * {@link ReciprocalRankFusion}, qui n'a besoin que de l'<em>ordre</em> des fils.
+ * {@code ReciprocalRankFusion}, qui n'a besoin que de l'<em>ordre</em> des fils.
  *
  * <p>Principe, expliqué en détail dans le journal (E15) :
  * <ol>

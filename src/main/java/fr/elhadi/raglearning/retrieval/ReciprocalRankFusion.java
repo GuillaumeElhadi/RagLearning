@@ -1,5 +1,7 @@
 package fr.elhadi.raglearning.retrieval;
 
+import org.springframework.stereotype.Component;
+
 import java.math.BigDecimal;
 import java.math.MathContext;
 import java.util.ArrayList;
@@ -10,6 +12,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+@Component
 public class ReciprocalRankFusion {
     /**
      * Fusionne des classements déjà triés du plus pertinent au moins pertinent avec

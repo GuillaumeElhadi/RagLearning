@@ -1,7 +1,6 @@
 package fr.elhadi.raglearning.evaluation;
 
 import fr.elhadi.raglearning.retrieval.RetrievalService;
-import fr.elhadi.raglearning.retrieval.RetrievedChunk;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -121,12 +120,7 @@ class RetrievalEvaluationTest {
     /** Rang du premier fil de référence parmi les fils distincts retrouvés pour cette formulation. */
     private OptionalInt rankOf(String question, List<String> expectedThreadIds) {
         final List<String> rankedThreadIds = retrievalService
-            .findRelatedChunksTo(question, SEARCH_DEPTH)
-            .stream()
-            .map(RetrievedChunk::metadata)
-            .map(metadata -> String.valueOf(metadata.get("threadId")))
-            .distinct()
-            .toList();
+            .findRelatedThreadIds(question, SEARCH_DEPTH);
         for (int index = 0; index < rankedThreadIds.size(); index++) {
             if (expectedThreadIds.contains(rankedThreadIds.get(index))) {
                 return OptionalInt.of(index + 1);

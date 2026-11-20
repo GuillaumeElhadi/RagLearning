@@ -47,4 +47,15 @@ public class RetrievalService {
                                                                 .content(document.getText())
                                                                 .build()).toList();
     }
+
+    public List<String> findRelatedThreadIds(final String userRequest, final int topK) {
+
+        return findRelatedChunksTo(userRequest, topK)
+            .stream()
+            .map(RetrievedChunk::metadata)
+            .map(metadata -> metadata.get("threadId"))
+            .map(Object::toString)
+            .distinct()
+            .toList();
+    }
 }
