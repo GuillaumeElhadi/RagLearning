@@ -336,9 +336,10 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il 
 ### Le banc d'évaluation de la recherche
 
 - **Jeu d'évaluation** : `src/test/resources/evaluation/retrieval-questions.json`, 10 questions réelles, chacune avec ses formulations par langue (`"variants": {"fr": […], "en": […]}`) et le ou les fils de référence (`expectedThreadIds`) vérifiés à la main. Les traductions anglaises sont fidèles, sans vocabulaire tiré des fils.
-- **Test** : `RetrievalEvaluationTest` interroge la recherche avec une profondeur de 30, classe les résultats par fil distinct, puis affiche, **pour chaque langue**, le rang de la première référence pour chaque question (le pire rang si une langue a plusieurs formulations), ainsi que :
+- **Test** : `RetrievalEvaluationTest` interroge **deux recherches** à la même profondeur de 30, la recherche **dense** seule et la recherche **hybride** (dense + mots-clés, fusion RRF), classe les résultats par fil distinct, puis affiche, **pour chaque langue et chaque recherche**, le rang de la première référence pour chaque question (le pire rang si une langue a plusieurs formulations), ainsi que :
   - **Hit@5** et **Hit@10** : part des questions dont une référence est dans les 5 (ou 10) premiers fils ;
-  - **MRR** : moyenne de 1/rang de la première référence.
+  - **MRR** : moyenne de 1/rang de la première référence ;
+  - les **mots-clés extraits** par le LLM pour chaque formulation (l'extraction n'est pas déterministe : ils expliquent un écart de rang, et un petit écart peut n'être que du bruit). Le test espionne `KeywordExtractor` (`@MockitoSpyBean`) pour les noter sans changer son comportement. Il lance un appel au LLM par formulation : `ANTHROPIC_API_KEY` doit être définie.
 - **Lancement** (il interroge la vraie base et Ollama, d'où la variable qui l'active) :
   ```bash
   RAG_EVALUATION=true ./mvnw test -Dtest=RetrievalEvaluationTest

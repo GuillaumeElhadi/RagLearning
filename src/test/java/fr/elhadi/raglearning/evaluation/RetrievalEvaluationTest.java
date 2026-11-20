@@ -1,10 +1,14 @@
 package fr.elhadi.raglearning.evaluation;
 
+import fr.elhadi.raglearning.retrieval.HybridRetrievalService;
 import fr.elhadi.raglearning.retrieval.RetrievalService;
+import fr.elhadi.raglearning.retrieval.keyword.KeywordExtractor;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
 import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
@@ -17,8 +21,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.SequencedSet;
+import java.util.function.BiFunction;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.doAnswer;
 
 /**
  * Mesure la qualité de la recherche sur un jeu de questions réelles, chacune associée aux fils
@@ -27,6 +34,11 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
  * Chaque question existe en plusieurs <b>variantes par langue</b> ({@code fr}, {@code en}…). Les indicateurs
  * sont calculés <b>par langue</b>, jamais en mélangeant les langues : on compare ainsi la même question posée
  * en français et en anglais, sur un corpus surtout anglophone.
+ * <p>
+ * Chaque question est aussi posée à deux <b>stratégies de recherche</b>, à la même profondeur : la recherche
+ * <b>dense</b> seule, et la recherche <b>hybride</b> (dense + mots-clés, fusion RRF). Le rapport les met côte
+ * à côte, puis affiche les mots-clés réellement extraits par le LLM pour l'hybride : ils changent d'une
+ * exécution à l'autre, c'est ce qui permet d'expliquer un écart de rang.
  * <p>
  * Ce n'est pas un test unitaire : il interroge la vraie base et le vrai modèle d'embedding.
  * Il ne s'exécute donc que sur demande :
@@ -53,19 +65,53 @@ class RetrievalEvaluationTest {
     private static final String LEGEND = """
 
         Légende
-          FR, EN  rang, pour la question posée dans cette langue, du premier fil de référence
-                  parmi les fils retrouvés (1 = en tête) ; >%d s'il n'est pas dans les %d premiers ;
-                  pire rang si la langue a plusieurs formulations
+          FR/dense, FR/hybrid, EN/…  rang, pour la question posée dans cette langue et cette recherche,
+                  du premier fil de référence parmi les fils retrouvés (1 = en tête) ;
+                  >%d s'il n'est pas dans les %d premiers ; pire rang si la langue a plusieurs formulations
+          dense   recherche vectorielle seule
+          hybrid  recherche dense + recherche par mots-clés (extraits par un LLM), fusion RRF
           Hit@5   part des questions dont un fil de référence est dans les 5 premiers
           Hit@10  part des questions dont un fil de référence est dans les 10 premiers,
                   c'est-à-dire dans le contexte réellement envoyé au LLM
           MRR     Mean Reciprocal Rank : moyenne de 1/rang (0 si absent) ;
                   1 = toujours premier, 0,5 = en moyenne deuxième, 0,1 = en moyenne dixième.
                   Contrairement aux Hit@k, il distingue un 1er rang d'un 4e
+          Les mots-clés varient d'une exécution à l'autre (appel au LLM) : un écart de quelques rangs
+          sur une question peut n'être que du bruit.
         """.formatted(SEARCH_DEPTH, SEARCH_DEPTH);
+
+    /** Une façon de chercher, comparée aux autres à la même profondeur. */
+    private record Strategy(String name, BiFunction<String, Integer, List<String>> search) {
+    }
 
     @Autowired
     private RetrievalService retrievalService;
+
+    @Autowired
+    private HybridRetrievalService hybridRetrievalService;
+
+    /** Espion : l'extracteur fait son vrai travail, et on note les mots qu'il a produits pour chaque question. */
+    @MockitoSpyBean
+    private KeywordExtractor keywordExtractor;
+
+    private final Map<String, List<String>> keywordsByQuestion = new LinkedHashMap<>();
+
+    @BeforeEach
+    @SuppressWarnings("unchecked")
+    void recordExtractedKeywords() {
+        keywordsByQuestion.clear();
+        doAnswer(invocation -> {
+            final List<String> keywords = (List<String>) invocation.callRealMethod();
+            keywordsByQuestion.put(invocation.getArgument(0), keywords);
+            return keywords;
+        }).when(keywordExtractor).extract(anyString());
+    }
+
+    private List<Strategy> strategies() {
+        return List.of(
+            new Strategy("dense", retrievalService::findRelatedThreadIds),
+            new Strategy("hybrid", hybridRetrievalService::findRelatedThreadIds));
+    }
 
     /**
      * Une question du jeu : ses formulations par langue et les fils qui y répondent.
@@ -83,11 +129,14 @@ class RetrievalEvaluationTest {
         }
     }
 
-    /** Le rang retenu pour chaque langue (vide = aucun fil de référence dans les {@value SEARCH_DEPTH} premiers). */
-    record CaseResult(EvaluationCase evaluationCase, Map<String, OptionalInt> rankByLanguage) {
+    /**
+     * Le rang retenu pour chaque recherche puis chaque langue (vide = aucun fil de référence dans les
+     * {@value SEARCH_DEPTH} premiers).
+     */
+    record CaseResult(EvaluationCase evaluationCase, Map<String, Map<String, OptionalInt>> rankByStrategyAndLanguage) {
 
-        OptionalInt rankIn(String language) {
-            return rankByLanguage.get(language);
+        OptionalInt rankIn(String strategy, String language) {
+            return rankByStrategyAndLanguage.get(strategy).get(language);
         }
     }
 
@@ -107,20 +156,23 @@ class RetrievalEvaluationTest {
     }
 
     private CaseResult evaluate(EvaluationCase evaluationCase, SequencedSet<String> languages) {
-        final Map<String, OptionalInt> rankByLanguage = new LinkedHashMap<>();
-        for (String language : languages) {
-            final List<OptionalInt> variantRanks = evaluationCase.variantsIn(language).stream()
-                .map(question -> rankOf(question, evaluationCase.expectedThreadIds()))
-                .toList();
-            rankByLanguage.put(language, worstRank(variantRanks));
+        final Map<String, Map<String, OptionalInt>> rankByStrategyAndLanguage = new LinkedHashMap<>();
+        for (Strategy strategy : strategies()) {
+            final Map<String, OptionalInt> rankByLanguage = new LinkedHashMap<>();
+            for (String language : languages) {
+                final List<OptionalInt> variantRanks = evaluationCase.variantsIn(language).stream()
+                    .map(question -> rankOf(strategy, question, evaluationCase.expectedThreadIds()))
+                    .toList();
+                rankByLanguage.put(language, worstRank(variantRanks));
+            }
+            rankByStrategyAndLanguage.put(strategy.name(), rankByLanguage);
         }
-        return new CaseResult(evaluationCase, rankByLanguage);
+        return new CaseResult(evaluationCase, rankByStrategyAndLanguage);
     }
 
     /** Rang du premier fil de référence parmi les fils distincts retrouvés pour cette formulation. */
-    private OptionalInt rankOf(String question, List<String> expectedThreadIds) {
-        final List<String> rankedThreadIds = retrievalService
-            .findRelatedThreadIds(question, SEARCH_DEPTH);
+    private OptionalInt rankOf(Strategy strategy, String question, List<String> expectedThreadIds) {
+        final List<String> rankedThreadIds = strategy.search().apply(question, SEARCH_DEPTH);
         for (int index = 0; index < rankedThreadIds.size(); index++) {
             if (expectedThreadIds.contains(rankedThreadIds.get(index))) {
                 return OptionalInt.of(index + 1);
@@ -143,46 +195,72 @@ class RetrievalEvaluationTest {
 
     private String report(List<CaseResult> results, SequencedSet<String> languages) {
         final StringBuilder report = new StringBuilder("\n=== Évaluation de la recherche ===\n");
+        final List<String> strategyNames = strategies().stream().map(Strategy::name).toList();
 
         report.append(String.format(Locale.ROOT, "%-4s", "#"));
-        languages.forEach(language -> report.append(String.format(Locale.ROOT, "%-6s", language.toUpperCase(Locale.ROOT))));
+        for (String language : languages) {
+            for (String strategy : strategyNames) {
+                report.append(String.format(Locale.ROOT, "%-11s", language.toUpperCase(Locale.ROOT) + "/" + strategy));
+            }
+        }
         report.append("Question\n");
 
         for (int index = 0; index < results.size(); index++) {
             final CaseResult result = results.get(index);
             report.append(String.format(Locale.ROOT, "%-4d", index + 1));
             for (String language : languages) {
-                report.append(String.format(Locale.ROOT, "%-6s", format(result.rankIn(language))));
+                for (String strategy : strategyNames) {
+                    report.append(String.format(Locale.ROOT, "%-11s", format(result.rankIn(strategy, language))));
+                }
             }
             report.append(abbreviate(result.evaluationCase().label())).append('\n');
         }
 
-        report.append(String.format(Locale.ROOT, "%n%-6s %8s %8s %8s%n", "Langue", "Hit@5", "Hit@10", "MRR"));
+        report.append(String.format(Locale.ROOT, "%n%-6s %-8s %8s %8s %8s%n", "Langue", "Recherche", "Hit@5", "Hit@10", "MRR"));
         for (String language : languages) {
-            report.append(String.format(Locale.ROOT, "%-6s %7.0f%% %7.0f%% %8.3f%n",
-                language.toUpperCase(Locale.ROOT),
-                100 * hitRate(results, language, 5),
-                100 * hitRate(results, language, 10),
-                meanReciprocalRank(results, language)));
+            for (String strategy : strategyNames) {
+                report.append(String.format(Locale.ROOT, "%-6s %-8s %7.0f%% %7.0f%% %8.3f%n",
+                    language.toUpperCase(Locale.ROOT),
+                    strategy,
+                    100 * hitRate(results, strategy, language, 5),
+                    100 * hitRate(results, strategy, language, 10),
+                    meanReciprocalRank(results, strategy, language)));
+            }
         }
+
+        report.append(extractedKeywords(results, languages));
         report.append(LEGEND);
         return report.toString();
+    }
+
+    /** Les mots-clés que le LLM a produits pour chaque formulation, pour expliquer les rangs de l'hybride. */
+    private String extractedKeywords(List<CaseResult> results, SequencedSet<String> languages) {
+        final StringBuilder section = new StringBuilder("\nMots-clés extraits (recherche hybride)\n");
+        for (int index = 0; index < results.size(); index++) {
+            for (String language : languages) {
+                for (String question : results.get(index).evaluationCase().variantsIn(language)) {
+                    section.append(String.format(Locale.ROOT, "#%-3d %-3s %s%n",
+                        index + 1, language, keywordsByQuestion.getOrDefault(question, List.of())));
+                }
+            }
+        }
+        return section.toString();
     }
 
     private String format(OptionalInt rank) {
         return rank.isPresent() ? String.valueOf(rank.getAsInt()) : ">" + SEARCH_DEPTH;
     }
 
-    private double hitRate(List<CaseResult> results, String language, int cutoff) {
+    private double hitRate(List<CaseResult> results, String strategy, String language, int cutoff) {
         return results.stream()
-            .map(result -> result.rankIn(language))
+            .map(result -> result.rankIn(strategy, language))
             .filter(rank -> rank.isPresent() && rank.getAsInt() <= cutoff)
             .count() / (double) results.size();
     }
 
-    private double meanReciprocalRank(List<CaseResult> results, String language) {
+    private double meanReciprocalRank(List<CaseResult> results, String strategy, String language) {
         return results.stream()
-            .map(result -> result.rankIn(language))
+            .map(result -> result.rankIn(strategy, language))
             .mapToDouble(rank -> rank.isPresent() ? 1.0 / rank.getAsInt() : 0.0)
             .average()
             .orElse(0.0);
