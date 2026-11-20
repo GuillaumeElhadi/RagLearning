@@ -42,7 +42,7 @@ fr.elhadi.raglearning
  ├─ retrieval/    RetrievalService, RetrievedChunk : retrouve les fils pertinents
  │   │            ReciprocalRankFusion : fusion de classements (RRF), pas encore branchée
  │   └─ keyword/  KeywordSearchService : recherche par mots-clés classée par fil, pas encore branchée
- │                KeywordExtractor : extrait les mots-clés d'une question avec un LLM (nettoyage fait, appel au LLM à venir)
+ │                KeywordExtractor : extrait les mots-clés d'une question avec un LLM, puis les nettoie
  ├─ generation/   QuestionAnsweringService, ThreadContextFormatter : construit le contexte, appelle le LLM
  ├─ api/          RagController : routes /rag/related-chunks et /rag/ask
  └─ config/       BeansConfig : beans partagés (découpeur de texte, client de chat)
@@ -266,7 +266,7 @@ Question ──► RetrievalService ──► 10 chunks les plus proches, fils r
   - ne jamais deviner les valeurs masquées (`[HOST]`, `[UUID]`…) ni mentionner de personnes ;
   - répondre dans la langue de la question.
 
-Le client de chat est configuré dans `BeansConfig` ; `SimpleLoggerAdvisor` journalise l'appel au modèle (blocs de réflexion, tokens, raison d'arrêt). La réponse ignore les résultats vides, car un bloc de réflexion peut arriver en premier.
+Il y a deux clients de chat, nommés dans `BeansConfig` : `questionAnsweringChatClient` (génération, prompt `system-prompt.st`) et `keywordExtractorChatClient` (extraction de mots-clés, prompt `keyword-extraction.st`). Chaque classe qui en reçoit un précise son nom avec `@Qualifier` (le fichier `lombok.config` demande à Lombok de recopier cette annotation sur le constructeur). Les deux utilisent le même modèle, Claude Haiku. `SimpleLoggerAdvisor` journalise l'appel au modèle (blocs de réflexion, tokens, raison d'arrêt). La réponse ignore les résultats vides, car un bloc de réflexion peut arriver en premier.
 
 Les deux routes attendent la question dans le paramètre `userRequest` :
 
@@ -363,7 +363,7 @@ Comportement :
 
 La requête SQL est expliquée pas à pas dans la Javadoc du service et dans le [journal](docs/rag-journal.md) (E15).
 
-`KeywordExtractor` prépare les mots-clés à partir de la question. Il sépare deux rôles : le LLM propose des mots (à venir), puis `normalize` applique une politique **déterministe** (retire les mots qui tombent sur les masques d'anonymisation `ip`, `host`, `uuid`, `redacted`, ignore les vides, plafonne à 8 mots). Le découpage des mots composés n'est **pas** dans l'extracteur : il est dans le service de recherche, qui doit tokeniser comme la base (voir E16). `normalize` est une fonction pure testée sans mock (`KeywordExtractorTest`).
+`KeywordExtractor` prépare les mots-clés à partir de la question. Il sépare deux rôles : le LLM propose des mots (`extract` : la question part telle quelle, la réponse est lue en sortie structurée `List<String>`), puis `normalize` applique une politique **déterministe** (retire les mots qui tombent sur les masques d'anonymisation `ip`, `host`, `uuid`, `redacted`, ignore les vides, plafonne à 8 mots). Le découpage des mots composés n'est **pas** dans l'extracteur : il est dans le service de recherche, qui doit tokeniser comme la base (voir E16). `normalize` est une fonction pure testée sans mock (`KeywordExtractorTest`).
 
 Ses tests (`KeywordSearchServiceTest`) tournent sur un vrai PostgreSQL avec pgvector lancé par **Testcontainers** : Docker (Colima sur Mac) doit donc être démarré, et la base de l'application n'est pas utilisée.
 
@@ -371,9 +371,9 @@ Ses tests (`KeywordSearchServiceTest`) tournent sur un vrai PostgreSQL avec pgve
 ./mvnw test -Dtest=KeywordSearchServiceTest
 ```
 
-### Exploration : extraction de mots-clés (E13)
+### Exploration : extraction de mots-clés (E13, E16)
 
-`KeywordExtractionExplorationTest` affiche les mots-clés qu'un LLM extrait de chaque question du jeu, avec le prompt `src/main/resources/prompts/keyword-extraction.st`. Il a servi à explorer la recherche par mots-clés, dont l'hypothèse a été réfutée (voir E13). Il appelle Anthropic : `ANTHROPIC_API_KEY` doit être définie dans l'environnement.
+`KeywordExtractionExplorationTest` affiche les mots-clés que `KeywordExtractor` extrait de chaque question du jeu, avec le prompt `src/main/resources/prompts/keyword-extraction.st`. Il a servi à explorer la recherche par mots-clés, dont l'hypothèse a été réfutée (voir E13), puis à vérifier l'extracteur (E16). Il appelle Anthropic : `ANTHROPIC_API_KEY` doit être définie dans l'environnement.
 
 ```bash
 RAG_EVALUATION=true ./mvnw test -Dtest=KeywordExtractionExplorationTest
@@ -404,7 +404,7 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 - [x] Code réorganisé par fonctionnalité (`ingestion`, `retrieval`, `generation`, `api`)
 - [ ] Mesure du bruit de formulation (reformulations dans la même langue)
 - [ ] Reranking des 30 premiers candidats
-- [ ] Recherche hybride (en cours sur la branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF et recherche par mots-clés faites (E15), nettoyage des mots-clés extraits fait (E16) ; restent l'appel au LLM de l'extracteur et l'assemblage avec la recherche dense
+- [ ] Recherche hybride (en cours sur la branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF et recherche par mots-clés faites (E15), extraction des mots-clés par un LLM faite (E16) ; reste l'assemblage avec la recherche dense (`HybridRetrievalService`) et la comparaison dense / hybride
 - [ ] Évaluation de la génération
 - [ ] Refactoring en architecture hexagonale
 - [ ] Comparaison avec l'advisor Spring AI (`QuestionAnswerAdvisor`)

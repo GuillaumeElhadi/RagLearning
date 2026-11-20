@@ -6,6 +6,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.client.advisor.SimpleLoggerAdvisor;
 import org.springframework.ai.chat.model.ChatResponse;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDate;
@@ -33,7 +34,8 @@ public class QuestionAnsweringService {
 
     private final RetrievalService retrievalService;
 
-    private final ChatClient chatClient;
+    @Qualifier("questionAnsweringChatClient")
+    private final ChatClient questionAnsweringChatClient;
 
     private final ThreadContextFormatter threadContextFormatter;
 
@@ -41,7 +43,7 @@ public class QuestionAnsweringService {
         log.info("Asking about: {}", question);
         final var relatedChunks = retrievalService.findRelatedChunksTo(question);
 
-        final ChatResponse chatResponse = chatClient.prompt()
+        final ChatResponse chatResponse = questionAnsweringChatClient.prompt()
                                                     .user(u -> u.text(USER_QUESTION_WITH_RAG_RESOURCES)
                                                                 .param("today", LocalDate.now(ZoneOffset.UTC).toString())
                                                                 .param("context", threadContextFormatter.format(relatedChunks))

@@ -379,7 +379,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - un classement par fil se pense en deux niveaux (score du chunk, puis agrégation par fil), et la limite se place après le second ;
   - tester le SQL sur la vraie base (Testcontainers) évite de simuler ce qui fait justement la valeur de la requête.
 
-### E16 — Extraire les mots-clés d'une question : qui nettoie quoi (2026-11-20, en cours)
+### E16 — Extraire les mots-clés d'une question : qui nettoie quoi (2026-11-20)
 
 - **Constat** : E13 a montré deux défauts du LLM : des mots composés (`api-key`) malgré la consigne « un seul mot », et des mots qui tombent sur les masques d'anonymisation (`ip`, `host`, `uuid` correspondent à `[IP]`, `[HOST]`, `[UUID]`). Avec `KeywordSearchService`, un composé devenait `apikey` et ne matchait plus rien, sans erreur.
 - **Hypothèse** : une règle écrite dans le prompt n'est jamais garantie (le LLM a déjà ignoré « un seul mot ») ; ce qui doit être fiable se règle **en code**, dans des fonctions pures testables sans LLM.
@@ -387,18 +387,29 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - **prompt** (`keyword-extraction.st`) : deux règles ajoutées (ne pas produire `ip`, `host`, `uuid`, `redacted`, et découper les composés) avec un exemple neutre, `rate-limit`, qui ne vient pas du jeu d'évaluation. Elles économisent des places dans les 3 à 8 mots, sans rien garantir ;
   - **`KeywordSearchService`** : le découpage des composés se fait ici, pas dans l'extracteur. La base découpe elle-même le texte indexé ; découper les mots-clés de la même façon est de la tokenisation du moteur, et un seul endroit doit la connaître, quel que soit l'appelant. Le service coupe sur tout ce qui n'est ni lettre ni chiffre, puis dédoublonne **les mots** ;
   - **`KeywordExtractor.normalize`** (fonction pure) : ignore les éléments vides ou `null`, écarte les mots de masque (comparés sans tenir compte de la casse), plafonne à 8 mots. Un mot écarté ne compte pas dans le plafond ;
-  - sous-package `retrieval/keyword/` pour les deux classes de la recherche par mots-clés.
-- **Mesure** : pas encore, l'appel au LLM (`extract`) n'est pas écrit. À faire ensuite avec `KeywordExtractionExplorationTest` : les mots obtenus sont-ils des mots simples, sans masque, en 3 à 8 ?
+  - sous-package `retrieval/keyword/` pour les deux classes de la recherche par mots-clés ;
+  - **`KeywordExtractor.extract`** : envoie la question telle quelle à un second client de chat (`keywordExtractorChatClient`, prompt d'extraction) et lit la réponse avec `.entity(ParameterizedTypeReference<List<String>>)`, puis applique `normalize`. Le modèle est le même que pour la génération (Claude Haiku) : un modèle local plus léger reste une expérience à part.- **Mesure** (les 10 questions du jeu, appel réel à Claude Haiku via `KeywordExtractionExplorationTest`) :
+  - aucune exception : `.entity(...)` lit bien la réponse, le cas du bloc de réflexion vide ne s'est pas produit ;
+  - 6 à 8 mots par question, tous en anglais, codes et noms de produits conservés (`401`, `403`, `502`, `504`, `uat`, `prep`, `kong`, `ping`) ;
+  - aucun mot de masque : la question qui parle de « plages d'IP » n'a pas produit `ip`. `normalize` n'a rien eu à retirer, donc le prompt a suffi sur ces dix cas (la règle en code reste un filet de sécurité non éprouvé en conditions réelles) ;
+  - latence : environ 0,7 à 1,8 s par appel, à ajouter à chaque recherche hybride ;
+  - **défaut restant** : sur une question, le LLM a écrit `apikey` (mots **collés**) au lieu de `api` et `key`. Il a obéi à « pas de trait d'union » en recollant. Le service ne peut pas le corriger : la base indexe `api-key` en `api` et `key`, jamais en `apikey`, donc ce mot ne matchera aucun fil ;
+  - **beaucoup de synonymes** (`whitelist` et `allowlist`, `expired` et `expiry`, `enable`, `forbidden`) et quelques mots génériques (`button`, `seconds`, `request`, `backend`) : E13 a montré qu'un mot ajouté profite aussi aux fils concurrents. Leur faible IDF limite l'effet des mots génériques ;
+  - **ce qui n'est pas mesuré** : la capacité de ces mots à retrouver les bons fils. Cela demande la recherche hybride branchée sur le banc.
 - **Ce qui s'est passé en chemin** :
   - la première répartition (découpage dans l'extracteur, nettoyage dans le service) dupliquait des règles et se contredisait (le service supprimait la ponctuation, l'extracteur la découpait). Voir où deux classes font la même chose est le signe qu'une responsabilité est mal placée ;
   - on avait dit que le nettoyage du service protégeait de l'injection SQL. C'était faux : les mots sont des paramètres liés. Il sert à rendre les mots **comparables** à ceux de `ts_stat` ;
   - `distinct()` avant le découpage laissait passer un mot en double (`["api-key", "key"]` donne `key` deux fois), qui comptait deux fois dans le score. Le dédoublonnage doit porter sur les mots finaux, pas sur les éléments d'entrée ;
-  - séparer l'appel au LLM d'une fonction pure `normalize` permet de tester la politique sans simulacre de `ChatClient`.
+  - séparer l'appel au LLM d'une fonction pure `normalize` permet de tester la politique sans simulacre de `ChatClient` ;
+  - avec deux beans `ChatClient`, l'injection par type devient ambiguë et l'application ne démarre plus. `@Primary` aurait été un piège : Spring choisit le bean primaire **avant** de regarder les noms, donc l'extracteur aurait reçu silencieusement le client de génération. La solution est de nommer les beans et d'injecter avec `@Qualifier` ; Lombok ne recopie pas cette annotation sur le constructeur sans `lombok.config` (`lombok.copyableAnnotations`) ;
+  - le `ChatClient.Builder` injecté est de portée prototype : chaque bean part d'un builder neuf, donc le prompt system de l'un ne fuit pas dans l'autre ;
+  - `entity(...)` ne prend pas de fonction de post-traitement et renvoie l'objet converti, pas un `ChatResponse` ; il faut un `ParameterizedTypeReference<List<String>>` pour garder le type des éléments.
 - **Leçons** :
   - **ne pas faire confiance à la sortie d'un LLM pour une règle qui doit être respectée** : la vérifier en code ;
   - **isoler la partie non déterministe** (l'appel au modèle) derrière des fonctions pures testables ;
   - la tokenisation d'une requête doit **imiter celle de l'index** ;
-  - dédoublonner à la fin d'une chaîne de transformations, pas au début.
+  - dédoublonner à la fin d'une chaîne de transformations, pas au début ;
+  - **une règle de prompt négative peut être contournée par un effet de bord** : « pas de trait d'union » a produit un mot collé. Préférer dire ce qu'on veut (« deux mots séparés ») et vérifier la sortie sur des cas réels.
 
 ---
 
@@ -411,7 +422,7 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 | 2026-11-15 | inchangé : recherche par mots-clés explorée en SQL, non intégrée (E13) | 60 % | 70 % | 0,457 |
 | 2026-11-17 | même configuration, questions traduites en anglais (E14, colonne EN) | 60 % | 70 % | 0,453 |
 | 2026-11-19 | inchangé : recherche par mots-clés classée par fil, non branchée sur le banc (E15) | 60 % | 70 % | 0,453 |
-| 2026-11-20 | inchangé : nettoyage des mots-clés extraits, non branché sur le banc (E16) | 60 % | 70 % | 0,453 |
+| 2026-11-20 | inchangé : extraction des mots-clés par un LLM, non branchée sur le banc (E16) | 60 % | 70 % | 0,453 |
 
 ---
 
@@ -477,7 +488,7 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 
 1. **Mesurer le bruit de formulation** : ajouter une ou deux reformulations françaises par question, écrites sans connaître les fils de référence (par exemple par un LLM), et observer la variation des rangs (E14). Permet de savoir quel écart est significatif avant de juger les expériences suivantes.
 2. **Reranking** : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
-3. **Recherche hybride** : en cours sur la branche `feature/hybrid-search`, pour apprendre la technique (fusion RRF, recherche par mots-clés classée par fil et nettoyage des mots-clés extraits faits, E15 et E16 ; restent l'appel au LLM de l'extracteur, l'assemblage et la comparaison dense / hybride). Le banc actuel ne devrait pas montrer de gain (E13) : il faut d'abord ajouter au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
+3. **Recherche hybride** : en cours sur la branche `feature/hybrid-search`, pour apprendre la technique (fusion RRF, recherche par mots-clés classée par fil et extraction des mots-clés par un LLM faites, E15 et E16 ; restent l'assemblage et la comparaison dense / hybride). Le banc actuel ne devrait pas montrer de gain (E13) : il faut d'abord ajouter au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
 4. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI), chercher avec chacune, puis fusionner. Cible : le décalage de vocabulaire (E7) et la sensibilité à la formulation (E14, plafond optimiste de 80 % de Hit@10). Attention à l'effet observé en E13 avec les synonymes.
 5. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
 6. **Ajuster la consigne sur les dates** (E10).
@@ -486,6 +497,7 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 9. **Industrialiser** : tests d'intégration autonomes (Testcontainers), schéma géré par Liquibase, refactoring en architecture hexagonale.
 10. **Anonymisation plus fine** : garder une partie utile et non sensible des valeurs masquées (`[HOST:prep]`, `[HOST:prod]`), pour ne pas perdre l'environnement concerné (E13).
 11. **Nettoyage** : un emoji collé à un mot (`:question:Submitted`) n'est pas retiré.
+12. **Extraction de mots-clés avec un modèle local léger** (E17) : comparer, avec `KeywordExtractionExplorationTest`, la qualité des mots, la latence (référence : environ 1 s avec Claude Haiku) et le coût d'un petit modèle de chat servi par Ollama. Demande de construire les `ChatClient` à la main (le `ChatClient.Builder` automatique devient ambigu avec deux modèles de chat). Risque : traduction et format JSON moins fiables.
 
 ---
 
