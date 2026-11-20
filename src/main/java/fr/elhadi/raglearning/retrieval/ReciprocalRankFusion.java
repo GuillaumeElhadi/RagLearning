@@ -34,11 +34,39 @@ public class ReciprocalRankFusion {
      * @throws IllegalArgumentException si {@code rankConstant} est négatif
      */
     public List<String> fuse(final List<List<String>> rankings, final int rankConstant) {
+        final List<Integer> equalWeights =
+            rankings == null ? List.of() : Collections.nCopies(rankings.size(), 1);
+        return fuse(rankings, equalWeights, rankConstant);
+    }
+
+    /**
+     * Fusionne des classements comme {@link #fuse(List, int)}, en donnant à chacun un <strong>poids</strong> :
+     * l'élément à la position {@code p} d'un classement de poids {@code w} marque
+     * {@code w / (p + 1 + rankConstant)}. Un poids {@code 2} revient à compter le classement deux fois ;
+     * un poids {@code 0} l'écarte (ses éléments n'apparaissent pas dans le résultat, sauf s'ils sont
+     * dans un autre classement).
+     *
+     * <p>Les poids sont des entiers : les scores restent exacts et la fusion reste déterministe.
+     * Les règles de {@link #fuse(List, int)} (doublons, départage, arrondi) s'appliquent à l'identique.
+     *
+     * @param rankings classements triés; une liste externe ou interne nulle est ignorée
+     * @param weights un poids non négatif par classement, dans le même ordre que {@code rankings}
+     * @param rankConstant constante de rang non négative, fournie par l'appelant (par exemple 60)
+     * @return éléments uniques ordonnés par score décroissant
+     * @throws IllegalArgumentException si {@code rankConstant} est négatif, si {@code weights} est
+     *     {@code null}, n'a pas autant d'éléments que {@code rankings}, ou contient une valeur négative
+     */
+    public List<String> fuse(final List<List<String>> rankings, final List<Integer> weights, final int rankConstant) {
         if (rankConstant < 0) {
             throw new IllegalArgumentException("rankConstant must be non-negative");
         }
 
-        final Map<String, BigDecimal> scores = calculateScores(rankings, rankConstant);
+        if (rankings == null || rankings.isEmpty()) {
+            return Collections.emptyList();
+        }
+        validateWeights(rankings, weights);
+
+        final Map<String, BigDecimal> scores = calculateScores(rankings, weights, rankConstant);
         if (scores.isEmpty()) {
             return Collections.emptyList();
         }
@@ -51,19 +79,28 @@ public class ReciprocalRankFusion {
         return fusedList;
     }
 
-    private Map<String, BigDecimal> calculateScores(
-        final List<List<String>> rankings, final int rankConstant) {
-        final Map<String, BigDecimal> scores = new LinkedHashMap<>();
-        if (rankings == null || rankings.isEmpty()) {
-            return scores;
+    private void validateWeights(final List<List<String>> rankings, final List<Integer> weights) {
+        if (weights == null || weights.size() != rankings.size()) {
+            throw new IllegalArgumentException("There must be exactly one weight per ranking");
         }
+        for (final Integer weight : weights) {
+            if (weight == null || weight < 0) {
+                throw new IllegalArgumentException("Weights must be non-negative");
+            }
+        }
+    }
 
-        for (final List<String> ranking : rankings) {
-            if (ranking == null || ranking.isEmpty()) {
+    private Map<String, BigDecimal> calculateScores(
+        final List<List<String>> rankings, final List<Integer> weights, final int rankConstant) {
+        final Map<String, BigDecimal> scores = new LinkedHashMap<>();
+        for (int index = 0; index < rankings.size(); index++) {
+            final List<String> ranking = rankings.get(index);
+            final int          weight  = weights.get(index);
+            if (ranking == null || ranking.isEmpty() || weight == 0) {
                 continue;
             }
 
-            addRankingScores(scores, ranking, rankConstant);
+            addRankingScores(scores, ranking, weight, rankConstant);
         }
         return scores;
     }
@@ -71,6 +108,7 @@ public class ReciprocalRankFusion {
     private void addRankingScores(
         final Map<String, BigDecimal> scores,
         final List<String> ranking,
+        final int weight,
         final int rankConstant
     ) {
         final Set<String> seenInRanking = new HashSet<>();
@@ -80,7 +118,7 @@ public class ReciprocalRankFusion {
                 continue;
             }
 
-            final BigDecimal contribution = BigDecimal.ONE.divide(
+            final BigDecimal contribution = BigDecimal.valueOf(weight).divide(
                 BigDecimal.valueOf((long) position + rankConstant + 1L),
                 MathContext.DECIMAL128
             );

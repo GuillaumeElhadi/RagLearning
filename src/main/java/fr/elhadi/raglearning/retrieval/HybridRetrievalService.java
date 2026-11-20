@@ -25,6 +25,12 @@ public class HybridRetrievalService {
      */
     static final int RRF_RANK_CONSTANT = 60;
 
+    /** Poids de la recherche dense dans la fusion par défaut : les deux recherches comptent autant. */
+    static final int DEFAULT_DENSE_WEIGHT = 1;
+
+    /** Poids de la recherche par mots-clés dans la fusion par défaut. */
+    static final int DEFAULT_KEYWORD_WEIGHT = 1;
+
     private final KeywordSearchService keywordSearchService;
 
     private final RetrievalService retrievalService;
@@ -54,8 +60,32 @@ public class HybridRetrievalService {
      * @throws IllegalArgumentException si {@code depth} est inférieur ou égal à zéro
      */
     public List<String> findRelatedThreadIds(final String question, final int depth) {
+        return findRelatedThreadIds(question, depth, DEFAULT_DENSE_WEIGHT, DEFAULT_KEYWORD_WEIGHT);
+    }
+
+    /**
+     * Comme {@link #findRelatedThreadIds(String, int)}, avec un poids pour chaque recherche dans la fusion.
+     * Un poids de {@code 2} pour la recherche dense et {@code 1} pour les mots-clés donne à la première deux
+     * fois plus d'influence sur l'ordre final : utile quand les mots-clés, souvent génériques, font
+     * descendre un bon fil que la recherche dense plaçait en tête.
+     *
+     * @param question question de l'utilisateur, dans n'importe quelle langue
+     * @param depth profondeur de chaque recherche et nombre maximal de fils retournés ; strictement positif
+     * @param denseWeight poids de la recherche dense ; non négatif ({@code 0} l'écarte)
+     * @param keywordWeight poids de la recherche par mots-clés ; non négatif ({@code 0} l'écarte)
+     *
+     * @return identifiants de fils, du plus pertinent au moins pertinent, sans doublon
+     *
+     * @throws IllegalArgumentException si {@code depth} est inférieur ou égal à zéro, ou si un poids est négatif
+     */
+    public List<String> findRelatedThreadIds(
+        final String question, final int depth, final int denseWeight, final int keywordWeight) {
         if (depth <= 0) {
             throw new IllegalArgumentException("Depth must be greater than 0");
+        }
+
+        if (denseWeight < 0 || keywordWeight < 0) {
+            throw new IllegalArgumentException("Weights must be non-negative");
         }
 
         if (!StringUtils.hasText(question)) {
@@ -65,7 +95,10 @@ public class HybridRetrievalService {
         final List<String> denseThreadIds = retrievalService.findRelatedThreadIds(question, depth);
         final List<String> keywordThreadIds = keywordSearchService.searchByKeywords(keywordExtractor.extract(question), depth);
 
-        return reciprocalRankFusion.fuse(List.of(denseThreadIds, keywordThreadIds), RRF_RANK_CONSTANT)
+        return reciprocalRankFusion.fuse(
+                                       List.of(denseThreadIds, keywordThreadIds),
+                                       List.of(denseWeight, keywordWeight),
+                                       RRF_RANK_CONSTANT)
                                    .stream()
                                    .limit(depth)
                                    .toList();

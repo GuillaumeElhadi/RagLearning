@@ -175,4 +175,96 @@ public class ReciprocalRankFusionTest {
         }
     }
 
+    @Nested
+    class Weighted {
+
+        @Test
+        void whenAllWeightsAreOneThenTheResultMatchesTheUnweightedFusion() {
+            final List<List<String>> rankings = List.of(List.of("A", "B", "C"), List.of("C", "B", "D"));
+
+            assertEquals(
+                reciprocalRankFusion.fuse(rankings, RANK_CONSTANT),
+                reciprocalRankFusion.fuse(rankings, List.of(1, 1), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenTwoRankingsDisagreeThenTheHeavierRankingDecidesTheOrder() {
+            final List<List<String>> rankings = List.of(List.of("A", "B"), List.of("B", "A"));
+
+            assertEquals(List.of("A", "B"), reciprocalRankFusion.fuse(rankings, List.of(2, 1), RANK_CONSTANT));
+            assertEquals(List.of("B", "A"), reciprocalRankFusion.fuse(rankings, List.of(1, 2), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenRankingsAreWeightedEqualAndDisagreeThenFirstEncounteredElementRanksFirst() {
+            final List<List<String>> rankings = List.of(List.of("A", "B"), List.of("B", "A"));
+
+            assertEquals(List.of("A", "B"), reciprocalRankFusion.fuse(rankings, List.of(1, 1), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenAWeightIsNThenTheRankingCountsAsIfItWasProvidedNTimes() {
+            final List<String> first = List.of("A", "B", "C");
+            final List<String> second = List.of("C", "B", "D");
+
+            assertEquals(
+                reciprocalRankFusion.fuse(List.of(first, second, second, second), RANK_CONSTANT),
+                reciprocalRankFusion.fuse(List.of(first, second), List.of(1, 3), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenAWeightIsZeroThenItsRankingIsIgnoredAndItsOwnElementsAreAbsent() {
+            final List<List<String>> rankings = List.of(List.of("A", "B"), List.of("C", "B"));
+
+            assertEquals(List.of("A", "B"), reciprocalRankFusion.fuse(rankings, List.of(1, 0), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenAllWeightsAreZeroThenEmptyListIsReturned() {
+            final List<List<String>> rankings = List.of(List.of("A"), List.of("B"));
+
+            assertEquals(List.of(), reciprocalRankFusion.fuse(rankings, List.of(0, 0), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenRankingsAreNullThenEmptyListIsReturned() {
+            assertEquals(List.of(), reciprocalRankFusion.fuse(null, List.of(), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenAWeightedRankingIsEmptyThenOnlyTheOtherRankingCounts() {
+            final List<List<String>> rankings = List.of(List.of(), List.of("A", "B"));
+
+            assertEquals(List.of("A", "B"), reciprocalRankFusion.fuse(rankings, List.of(5, 1), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenWeightsAreNullThenAnExceptionIsThrown() {
+            final List<List<String>> rankings = List.of(List.of("A"));
+
+            assertThrows(IllegalArgumentException.class, () -> reciprocalRankFusion.fuse(rankings, null, RANK_CONSTANT));
+        }
+
+        @Test
+        void whenThereIsNotExactlyOneWeightPerRankingThenAnExceptionIsThrown() {
+            final List<List<String>> rankings = List.of(List.of("A"), List.of("B"));
+
+            assertThrows(IllegalArgumentException.class, () -> reciprocalRankFusion.fuse(rankings, List.of(1), RANK_CONSTANT));
+            assertThrows(IllegalArgumentException.class, () -> reciprocalRankFusion.fuse(rankings, List.of(1, 1, 1), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenAWeightIsNegativeThenAnExceptionIsThrown() {
+            final List<List<String>> rankings = List.of(List.of("A"), List.of("B"));
+
+            assertThrows(IllegalArgumentException.class, () -> reciprocalRankFusion.fuse(rankings, List.of(1, -1), RANK_CONSTANT));
+        }
+
+        @Test
+        void whenRankConstantIsNegativeThenAnExceptionIsThrown() {
+            final List<List<String>> rankings = List.of(List.of("A"));
+
+            assertThrows(IllegalArgumentException.class, () -> reciprocalRankFusion.fuse(rankings, List.of(1), -1));
+        }
+    }
 }

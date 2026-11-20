@@ -16,6 +16,7 @@ import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.DoubleSummaryStatistics;
+import java.util.HashMap;
 import java.util.IntSummaryStatistics;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -42,10 +43,14 @@ import static org.mockito.Mockito.doAnswer;
  * sont calculés <b>par langue</b>, jamais en mélangeant les langues : on compare ainsi la même question posée
  * en français et en anglais, sur un corpus surtout anglophone.
  * <p>
- * Chaque question est aussi posée à deux <b>stratégies de recherche</b>, à la même profondeur : la recherche
- * <b>dense</b> seule, et la recherche <b>hybride</b> (dense + mots-clés, fusion RRF). Le rapport les met côte
- * à côte, puis affiche les mots-clés réellement extraits par le LLM pour l'hybride : ils changent d'une
- * exécution à l'autre, c'est ce qui permet d'expliquer un écart de rang.
+ * Chaque question est aussi posée à plusieurs <b>stratégies de recherche</b>, à la même profondeur : la recherche
+ * <b>dense</b> seule, et la recherche <b>hybride</b> (dense + mots-clés, fusion RRF) avec trois pondérations
+ * (dense:mots-clés = 1:1, 2:1 et 4:1). Le rapport les met côte à côte, puis affiche les mots-clés réellement
+ * extraits par le LLM : ils changent d'une exécution à l'autre, c'est ce qui permet d'expliquer un écart de rang.
+ * <p>
+ * Au sein d'une même exécution, les stratégies hybrides <b>partagent la même extraction</b> de mots-clés pour
+ * une question donnée : la comparaison des pondérations est <i>appariée</i>, le bruit du LLM n'y entre pas.
+ * L'extraction est tirée de nouveau à chaque exécution.
  * <p>
  * L'extraction des mots-clés par le LLM n'est pas déterministe : une seule exécution ne permet pas de dire si
  * un écart de rang est un effet réel ou du bruit. Le banc répète donc toute la mesure
@@ -90,7 +95,9 @@ class RetrievalEvaluationTest {
                   affiché >%d, et compté %d dans la moyenne ; pire rang si la langue a plusieurs formulations.
                   Un min et un max éloignés = rang instable : ne pas conclure sur une seule exécution
           dense   recherche vectorielle seule (déterministe : min = moyenne = max, sinon il y a un problème)
-          hybrid  recherche dense + recherche par mots-clés (extraits par un LLM), fusion RRF
+          hybrid d:m  recherche dense + recherche par mots-clés (extraits par un LLM), fusion RRF ; d:m est le
+                  rapport des poids dense:mots-clés (1:1 = à égalité, 4:1 = la dense compte quatre fois plus).
+                  Les lignes hybrides d'une même exécution partagent les mêmes mots-clés
           Hit@5   part des questions dont un fil de référence est dans les 5 premiers (moyenne des exécutions)
           Hit@10  idem pour les 10 premiers, c'est-à-dire le contexte réellement envoyé au LLM
           MRR     Mean Reciprocal Rank : moyenne de 1/rang (0 si absent) ; min, moyenne et max de l'exécution.
@@ -122,6 +129,12 @@ class RetrievalEvaluationTest {
     /** Pour chaque question, le message de chaque échec de l'extraction (le LLM n'a pas rendu un JSON lisible). */
     private final Map<String, List<String>> extractionFailuresByQuestion = new LinkedHashMap<>();
 
+    /** Mots-clés déjà tirés pour chaque question dans l'exécution en cours, réutilisés par toutes les pondérations. */
+    private final Map<String, List<String>> extractionsInCurrentRun = new HashMap<>();
+
+    /** Échecs déjà subis dans l'exécution en cours : un second appel ne doit pas réussir là où le premier a échoué. */
+    private final Map<String, ExtractionFailed> failuresInCurrentRun = new HashMap<>();
+
     /**
      * Échec de l'extraction des mots-clés, signalé par l'espion. Le banc l'attrape pour le compter au lieu de
      * s'arrêter : il ne rattrape que celui-là, une panne de la base ou des embeddings doit toujours le faire échouer.
@@ -138,24 +151,50 @@ class RetrievalEvaluationTest {
     void recordExtractedKeywords() {
         keywordsByQuestion.clear();
         extractionFailuresByQuestion.clear();
+        startRun();
         doAnswer(invocation -> {
             final String question = invocation.getArgument(0);
+            final ExtractionFailed knownFailure = failuresInCurrentRun.get(question);
+            if (knownFailure != null) {
+                throw knownFailure;
+            }
+            final List<String> knownKeywords = extractionsInCurrentRun.get(question);
+            if (knownKeywords != null) {
+                return knownKeywords;
+            }
             try {
                 final List<String> keywords = (List<String>) invocation.callRealMethod();
+                extractionsInCurrentRun.put(question, keywords);
                 keywordsByQuestion.computeIfAbsent(question, ignored -> new ArrayList<>()).add(keywords);
                 return keywords;
             } catch (RuntimeException failure) {
                 final String message = String.valueOf(failure.getMessage()).lines().findFirst().orElse("").strip();
                 extractionFailuresByQuestion.computeIfAbsent(question, ignored -> new ArrayList<>()).add(message);
-                throw new ExtractionFailed(message, failure);
+                final ExtractionFailed failed = new ExtractionFailed(message, failure);
+                failuresInCurrentRun.put(question, failed);
+                throw failed;
             }
         }).when(keywordExtractor).extract(anyString());
+    }
+
+    /** Oublie les mots-clés de l'exécution précédente : chaque exécution tire sa propre extraction. */
+    private void startRun() {
+        extractionsInCurrentRun.clear();
+        failuresInCurrentRun.clear();
     }
 
     private List<Strategy> strategies() {
         return List.of(
             new Strategy("dense", retrievalService::findRelatedThreadIds),
-            new Strategy("hybrid", hybridRetrievalService::findRelatedThreadIds));
+            hybrid(1, 1),
+            hybrid(2, 1),
+            hybrid(4, 1));
+    }
+
+    /** Recherche hybride avec ce rapport de poids dense:mots-clés. */
+    private Strategy hybrid(int denseWeight, int keywordWeight) {
+        return new Strategy("hybrid " + denseWeight + ":" + keywordWeight,
+            (question, depth) -> hybridRetrievalService.findRelatedThreadIds(question, depth, denseWeight, keywordWeight));
     }
 
     /**
@@ -197,6 +236,7 @@ class RetrievalEvaluationTest {
         final List<List<CaseResult>> runs = IntStream.rangeClosed(1, runCount)
             .mapToObj(run -> {
                 System.out.printf("Exécution %d/%d…%n", run, runCount);
+                startRun();
                 return cases.stream().map(evaluationCase -> evaluate(evaluationCase, languages)).toList();
             })
             .toList();
@@ -286,7 +326,7 @@ class RetrievalEvaluationTest {
             report.append(abbreviate(firstRun.get(index).evaluationCase().label())).append('\n');
         }
 
-        report.append(String.format(Locale.ROOT, "%n%-6s %-9s %9s %10s %9s %9s %9s%n",
+        report.append(String.format(Locale.ROOT, "%n%-6s %-11s %9s %10s %9s %9s %9s%n",
             "Langue", "Recherche", "Hit@5 moy", "Hit@10 moy", "MRR min", "MRR moy", "MRR max"));
         for (String language : languages) {
             for (String strategy : strategyNames) {
@@ -296,7 +336,7 @@ class RetrievalEvaluationTest {
                     .mapToDouble(run -> hitRate(run, strategy, language, 10)).summaryStatistics();
                 final DoubleSummaryStatistics mrr = runs.stream()
                     .mapToDouble(run -> meanReciprocalRank(run, strategy, language)).summaryStatistics();
-                report.append(String.format(Locale.ROOT, "%-6s %-9s %8.0f%% %9.0f%% %9.3f %9.3f %9.3f%n",
+                report.append(String.format(Locale.ROOT, "%-6s %-11s %8.0f%% %9.0f%% %9.3f %9.3f %9.3f%n",
                     language.toUpperCase(Locale.ROOT),
                     strategy,
                     100 * hit5.getAverage(),
