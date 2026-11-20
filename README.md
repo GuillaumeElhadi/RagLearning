@@ -40,8 +40,9 @@ fr.elhadi.raglearning
  ├─ ingestion/    RagIngestorService, CommandLineIngestor : charge l'export Slack dans la base
  │   └─ slack/    lecture, nettoyage, anonymisation et classification des fils ; modèle de l'export
  ├─ retrieval/    RetrievalService, RetrievedChunk : retrouve les fils pertinents
- │   │            ReciprocalRankFusion : fusion de classements (RRF), pas encore branchée
- │   └─ keyword/  KeywordSearchService : recherche par mots-clés classée par fil, pas encore branchée
+ │   │            ReciprocalRankFusion : fusion de classements (RRF)
+ │   │            HybridRetrievalService : recherche dense + mots-clés, fusion RRF ; rend des fils, pas encore branchée sur l'API
+ │   └─ keyword/  KeywordSearchService : recherche par mots-clés classée par fil
  │                KeywordExtractor : extrait les mots-clés d'une question avec un LLM, puis les nettoie
  ├─ generation/   QuestionAnsweringService, ThreadContextFormatter : construit le contexte, appelle le LLM
  ├─ api/          RagController : routes /rag/related-chunks et /rag/ask
@@ -345,7 +346,7 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il 
   RAG_EVALUATION=true ./mvnw test -Dtest=RetrievalEvaluationTest
   ```
 
-Mesure actuelle : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
+Mesure actuelle, recherche dense seule : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. Recherche hybride (dense + mots-clés, RRF), une seule exécution : 80 %, 90 %, 0,560 en français ; 70 %, 80 %, 0,419 en anglais, soit un gain net en français et un bilan mitigé en anglais (voir E17). L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
 
 ⚠️ Ne jamais reprendre une question du jeu comme exemple dans un prompt : on ajusterait le système au jeu d'évaluation (sur-apprentissage), et les mesures ne vaudraient plus rien.
 
@@ -405,7 +406,7 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 - [x] Code réorganisé par fonctionnalité (`ingestion`, `retrieval`, `generation`, `api`)
 - [ ] Mesure du bruit de formulation (reformulations dans la même langue)
 - [ ] Reranking des 30 premiers candidats
-- [ ] Recherche hybride (en cours sur la branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF et recherche par mots-clés faites (E15), extraction des mots-clés par un LLM faite (E16) ; reste l'assemblage avec la recherche dense (`HybridRetrievalService`) et la comparaison dense / hybride
+- [x] Recherche hybride (branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF, recherche par mots-clés (E15), extraction des mots-clés par un LLM (E16), assemblage et comparaison dense / hybride (E17). Elle rend des fils et n'est pas branchée sur `/rag/ask`, qui demanderait de charger le texte d'un fil
 - [ ] Évaluation de la génération
 - [ ] Refactoring en architecture hexagonale
 - [ ] Comparaison avec l'advisor Spring AI (`QuestionAnswerAdvisor`)

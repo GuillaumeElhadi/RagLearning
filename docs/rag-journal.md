@@ -411,6 +411,50 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - dédoublonner à la fin d'une chaîne de transformations, pas au début ;
   - **une règle de prompt négative peut être contournée par un effet de bord** : « pas de trait d'union » a produit un mot collé. Préférer dire ce qu'on veut (« deux mots séparés ») et vérifier la sortie sur des cas réels.
 
+### E17 — Recherche hybride : dense + mots-clés, fusion RRF (2026-11-20)
+
+- **Constat** : la recherche dense classe mal les questions 5, 9 et 10 (rangs 18, 12 et 26 en français). E13 avait réfuté l'idée d'une recherche par mots-clés **seule** et prévoyait que la fusion ne ferait pas mieux sur ce jeu.
+- **Hypothèse** : fusionner le classement dense (30 chunks, ramenés à des fils) et le classement par mots-clés (30 fils) avec la RRF (constante 60) fait remonter une référence que les mots-clés repèrent même si la dense la classe mal. Le risque, déjà vu en E13 : des mots génériques font redescendre une référence que la dense classait bien.
+- **Changement** :
+  - `HybridRetrievalService.findRelatedThreadIds(question, depth)` : recherche dense, extraction des mots-clés, recherche par mots-clés, fusion RRF, troncature à `depth`. Il rend des identifiants de fils, pas du texte, et n'est pas branché sur `/rag/related-chunks` ni `/rag/ask` ;
+  - `RetrievalService.findRelatedThreadIds` : la liste des fils distincts de la recherche dense, partagée par le banc et l'hybride (les colonnes « dense » redonnent exactement le tableau d'E14) ;
+  - le banc compare les deux recherches à la même profondeur (30) et affiche les mots-clés extraits pour chaque formulation (`@MockitoSpyBean` sur `KeywordExtractor`, qui garde son vrai comportement).
+- **Mesure** (une seule exécution, rang de la première référence, `dense` → `hybrid`) :
+
+  | # | FR | EN | | # | FR | EN |
+  |---|---|---|---|---|---|---|
+  | 1 | 1 → 1 | 1 → 3 | | 6 | 1 → 1 | 1 → 1 |
+  | 2 | 4 → **2** | 16 → **2** | | 7 | 1 → 7 | 1 → 3 |
+  | 3 | 2 → 3 | 4 → 3 | | 8 | 7 → **1** | 2 → 2 |
+  | 4 | 2 → **1** | 2 → **1** | | 9 | 12 → 25 | 9 → 23 |
+  | 5 | 18 → **4** | 22 → **7** | | 10 | 26 → **3** | 17 → >30 |
+
+  | Langue | Recherche | Hit@5 | Hit@10 | MRR |
+  |---|---|---|---|---|
+  | FR | dense | 60 % | 70 % | 0,457 |
+  | FR | hybrid | **80 %** | **90 %** | **0,560** |
+  | EN | dense | 60 % | 70 % | 0,453 |
+  | EN | hybrid | 70 % | 80 % | 0,419 |
+
+- **Lecture** :
+  - **en français, un gain net** : 5 questions progressent, 3 reculent, 2 sont inchangées ; deux questions entrent dans le top 10 (5 et 10), Hit@10 passe de 70 % à 90 % et le MRR de 0,457 à 0,560. E13 prévoyait l'inverse : il raisonnait sur le rang des mots-clés **seuls**, alors que la fusion ne demande que de l'accord sur les bons fils ;
+  - **en anglais, un bilan mitigé** : 4 questions progressent, 4 reculent. Hit@10 gagne une question, mais le MRR **baisse** (0,453 → 0,419) : deux questions bien classées par la dense (1 et 7) perdent des places, et la question 10 sort du top 30 ;
+  - **la fusion aide quand la dense classe mal une référence que les mots-clés repèrent** (rang 4 à 26 en dense : questions 2, 4, 5, 8, 10), y compris pour la question 2 en anglais (16 → 2), la plus sensible à la formulation en E14 ;
+  - **elle nuit quand la dense classait déjà bien la référence** (questions 1 et 7 : 1 → 3 et 1 → 7) : une liste de mots-clés bruitée peut surclasser un bon résultat que seule la dense voyait ;
+  - **la question 9 recule dans les deux langues** (12 → 25, 9 → 23). Ses mots-clés (`504`, `gateway`, `timeout`, `kong`, `upstream`, `seconds`) sont banals dans un canal de support d'une passerelle : ils ramènent beaucoup de fils concurrents. C'est le mécanisme décrit en E13 ;
+  - **la question 10 dépend d'un mot** : en français, le LLM a produit `jwt` et `signature` (rang 3) ; en anglais, ni l'un ni l'autre (hors du top 30). Le même fil passe de 3 à >30 selon la formulation. `jwt` vient peut-être de l'exemple du prompt (`token -> jwt`), ce qui rend ce gain fragile.
+- **Réserves** :
+  - **une seule exécution, dix questions** : E14 a montré qu'un écart de quelques rangs peut être du bruit de formulation, et ici s'y ajoute l'extraction par LLM, non déterministe (les listes de mots changent d'une exécution à l'autre) ;
+  - les listes de mots françaises et anglaises d'une même question diffèrent (par exemple `plugin` en français pour la question 2, `jwt` pour la 10) : une partie de l'écart FR / EN vient des mots choisis, pas de la langue ;
+  - le jeu n'a toujours aucune question à terme rare : le gain constaté vient du vocabulaire courant, pas du cas d'usage pour lequel la recherche par mots-clés est faite.
+- **Leçons** :
+  - **la fusion récompense l'accord** : elle aide une référence mal classée par la dense mais repérée par les mots-clés, et pénalise un bon résultat que la dense est seule à voir ;
+  - **une prévision faite sur un composant seul ne vaut pas pour la fusion** : E13 s'est trompé en jugeant la recherche par mots-clés isolée. Il faut mesurer le système assemblé ;
+  - **un système qui dépend d'une étape non déterministe doit afficher ses entrées intermédiaires** (ici les mots extraits), sans quoi un écart de rang est inexplicable ;
+  - lire les rangs **question par question** : les moyennes françaises et anglaises racontent deux histoires différentes ;
+  - les mots-clés génériques sont le principal risque d'une recherche hybride sur un corpus de domaine.
+- **Suite possible** : mesurer le bruit (répéter l'exécution, ajouter des reformulations), pondérer la dense plus fortement que les mots-clés dans la fusion ou réduire la profondeur de la recherche par mots-clés, ajouter des questions à terme rare, puis le reranking.
+
 ---
 
 ## 3. Historique des mesures
@@ -423,6 +467,8 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 | 2026-11-17 | même configuration, questions traduites en anglais (E14, colonne EN) | 60 % | 70 % | 0,453 |
 | 2026-11-19 | inchangé : recherche par mots-clés classée par fil, non branchée sur le banc (E15) | 60 % | 70 % | 0,453 |
 | 2026-11-20 | inchangé : extraction des mots-clés par un LLM, non branchée sur le banc (E16) | 60 % | 70 % | 0,453 |
+| 2026-11-20 | recherche hybride dense + mots-clés, fusion RRF (constante 60, profondeur 30), questions en français (E17) | 80 % | 90 % | 0,560 |
+| 2026-11-20 | idem, questions en anglais (E17) | 70 % | 80 % | 0,419 |
 
 ---
 
@@ -488,7 +534,7 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 
 1. **Mesurer le bruit de formulation** : ajouter une ou deux reformulations françaises par question, écrites sans connaître les fils de référence (par exemple par un LLM), et observer la variation des rangs (E14). Permet de savoir quel écart est significatif avant de juger les expériences suivantes.
 2. **Reranking** : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
-3. **Recherche hybride** : en cours sur la branche `feature/hybrid-search`, pour apprendre la technique (fusion RRF, recherche par mots-clés classée par fil et extraction des mots-clés par un LLM faites, E15 et E16 ; restent l'assemblage et la comparaison dense / hybride). Le banc actuel ne devrait pas montrer de gain (E13) : il faut d'abord ajouter au jeu d'évaluation des questions à **terme rare** (identifiant, nom d'application, code peu fréquent). Pistes de E13 : mots groupés par concept (OU dans le concept, ET entre concepts), vrai BM25, fusion RRF. Les fichiers d'exploration (`prompts/keyword-extraction.st`, `KeywordExtractionExplorationTest`) servent de point de départ.
+3. **Recherche hybride** : faite et mesurée (E17), non branchée sur `/rag/ask`. Gain net en français (Hit@10 70 → 90 %), bilan mitigé en anglais (MRR en baisse). Pistes : mesurer le bruit de l'extraction par plusieurs exécutions, pondérer la dense plus fortement dans la fusion ou réduire la profondeur des mots-clés, ajouter au jeu des questions à **terme rare** (identifiant, nom d'application, code peu fréquent), mots groupés par concept (E13), vrai BM25. Brancher l'hybride sur la génération demande de charger le texte d'un fil à partir de son identifiant.
 4. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI), chercher avec chacune, puis fusionner. Cible : le décalage de vocabulaire (E7) et la sensibilité à la formulation (E14, plafond optimiste de 80 % de Hit@10). Attention à l'effet observé en E13 avec les synonymes.
 5. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
 6. **Ajuster la consigne sur les dates** (E10).
