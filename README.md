@@ -2,7 +2,7 @@
 
 Projet d'apprentissage : construire un RAG (*Retrieval-Augmented Generation*) de A à Z avec Spring AI.
 
-Le RAG répond aux questions de support sur le Developer Portal (API management avec Kong et Ping Identity) à partir de l'**historique anonymisé d'un canal Slack de support** : chaque fil (question, échanges, résolution) devient un document. Une première phase a porté sur un livre PDF ; ce code est conservé mais n'est plus branché.
+Le RAG répond aux questions de support sur le Developer Portal (API management avec Kong et Ping Identity) à partir de l'**historique anonymisé d'un canal Slack de support** : chaque fil (question, échanges, résolution) devient un document. Une première phase a porté sur un livre PDF ; ce code a été retiré, ses leçons restent dans le journal (E1).
 
 Le **pourquoi** de chaque choix, les expériences menées et leurs mesures sont dans le [journal d'expérimentation](docs/rag-journal.md). Ce README décrit **comment le projet fonctionne**.
 
@@ -30,6 +30,26 @@ REQUÊTE (à chaque question)
 | LLM (« l'élève qui répond ») | Anthropic Claude Haiku 5.5 | Rédige la réponse à partir du texte des fils retrouvés |
 
 Le modèle d'embedding et le LLM sont **indépendants** : Claude ne voit jamais les vecteurs, seulement le texte des fils retrouvés.
+
+## Organisation du code
+
+Le code est regroupé **par fonctionnalité**, un dossier par étape du RAG, et non par type de classe : ce qui change ensemble vit ensemble.
+
+```
+fr.elhadi.raglearning
+ ├─ ingestion/    RagIngestorService, CommandLineIngestor : charge l'export Slack dans la base
+ │   └─ slack/    lecture, nettoyage, anonymisation et classification des fils ; modèle de l'export
+ ├─ retrieval/    RetrievalService, RetrievedChunk : retrouve les fils pertinents
+ │   │            ReciprocalRankFusion : fusion de classements (RRF)
+ │   │            HybridRetrievalService : recherche dense + mots-clés, fusion RRF ; rend des fils, pas encore branchée sur l'API
+ │   └─ keyword/  KeywordSearchService : recherche par mots-clés classée par fil
+ │                KeywordExtractor : extrait les mots-clés d'une question avec un LLM, puis les nettoie
+ ├─ generation/   QuestionAnsweringService, ThreadContextFormatter : construit le contexte, appelle le LLM
+ ├─ api/          RagController : routes /rag/related-chunks et /rag/ask
+ └─ config/       BeansConfig : beans partagés (découpeur de texte, client de chat)
+```
+
+Les dépendances vont dans un seul sens : `api` utilise `generation` et `retrieval`, `generation` utilise `retrieval`, et `ingestion` est indépendante des trois autres (elle ne partage que la base). Les tests suivent la même arborescence ; les bancs d'évaluation sont dans `evaluation/`, car ils traversent plusieurs blocs.
 
 ## Prérequis
 
@@ -182,10 +202,6 @@ Ces règles ne peuvent pas reconnaître un nom ou un secret écrit en texte libr
 
 Les chunks reçoivent des **identifiants stables** et pgvector fait un **upsert** (`ON CONFLICT DO UPDATE`) : réingérer le même export ne crée pas de doublons. En revanche, si le découpage ou le nettoyage change, d'anciens chunks peuvent rester **orphelins**. D'où le `TRUNCATE devportal_knowledge` avant chaque réingestion complète.
 
-### Première phase : un livre PDF
-
-`RagIngestorService.ingestPdf()` reste disponible (son appel est commenté dans `CommandLineIngestor`) : `ParagraphPdfDocumentReader` produit un document par entrée du **plan** du PDF (ses signets, pas la page « Sommaire »), puis `TextCleanerTransformer` nettoie le texte avant le découpage. Le lecteur lève une exception si le PDF n'a pas de plan ; utiliser alors `PagePdfDocumentReader`. Voir aussi [Problèmes connus à l'ingestion des PDF](#problèmes-connus-à-lingestion-des-pdf).
-
 ## Le modèle de données
 
 Spring AI crée la table `devportal_knowledge`, avec **une ligne par chunk** :
@@ -251,7 +267,7 @@ Question ──► RetrievalService ──► 10 chunks les plus proches, fils r
   - ne jamais deviner les valeurs masquées (`[HOST]`, `[UUID]`…) ni mentionner de personnes ;
   - répondre dans la langue de la question.
 
-Le client de chat est configuré dans `BeansConfig` ; `SimpleLoggerAdvisor` journalise l'appel au modèle (blocs de réflexion, tokens, raison d'arrêt). La réponse ignore les résultats vides, car un bloc de réflexion peut arriver en premier.
+Il y a deux clients de chat, nommés dans `BeansConfig` : `questionAnsweringChatClient` (génération, prompt `system-prompt.st`) et `keywordExtractorChatClient` (extraction de mots-clés, prompt `keyword-extraction.st`). Chaque classe qui en reçoit un précise son nom avec `@Qualifier` (le fichier `lombok.config` demande à Lombok de recopier cette annotation sur le constructeur). Les deux utilisent le même modèle, Claude Haiku. `SimpleLoggerAdvisor` journalise l'appel au modèle (blocs de réflexion, tokens, raison d'arrêt). La réponse ignore les résultats vides, car un bloc de réflexion peut arriver en premier.
 
 Les deux routes attendent la question dans le paramètre `userRequest` :
 
@@ -314,27 +330,6 @@ Pour voir le SQL exécuté par Spring, activer temporairement `logging.level.org
 - **Préférer un échec bruyant à une perte silencieuse** : `truncate=false` plutôt qu'une troncature invisible.
 - **La référence pour les propriétés d'une bibliothèque Spring est son catalogue** (`META-INF/spring-configuration-metadata.json` dans le JAR, celui qu'utilise l'autocomplétion d'IntelliJ), pas la documentation : une propriété documentée mais absente du catalogue peut être ignorée sans avertissement.
 
-## Problèmes connus à l'ingestion des PDF
-
-Aucun n'est bloquant (l'ingestion va au bout), mais les deux premiers dégradent la **qualité des chunks**. Un RAG ne retrouve pas ce que l'extraction a abîmé : *garbage in, garbage out*.
-
-| Message | Cause | Conséquence |
-|---------|-------|-------------|
-| `ERROR ForkPDFLayoutTextStripper : Error sorting text positions` / `Comparison method violates its general contract!` | Bug de Spring AI : sa règle de tri des fragments de texte n'est pas cohérente sur certaines mises en page, et le tri Java abandonne. L'exception est rattrapée. | Sur les pages concernées, le texte peut être dans le désordre. |
-| `WARN PDType0Font : No Unicode mapping for CID+... in font CambriaMath` | Les formules mathématiques du PDF sont stockées comme des glyphes sans table de correspondance vers des caractères. | Formules perdues ou caractères illisibles dans le `content`. Aucun réglage de PDFBox ne les récupère. |
-| Beaucoup d'espaces et de sauts de ligne dans le `content` | Le *Layout*TextStripper imite la mise en page visuelle avec des espaces et des retours à la ligne. | Tokens gaspillés (des sections courtes donnent 2 chunks) et sens dilué dans les vecteurs. |
-| `WARNING: A restricted method in java.lang.System has been called` | Netty charge du code natif sans autorisation explicite (Java récent). | Aucune. Option JVM indiquée dans le message pour le faire taire. |
-| `ERROR DnsServerAddressStreamProviders : Unable to load ...MacOSDnsServerAddressStreamProvider` | Résolveur DNS natif macOS de Netty absent du classpath ; repli sur le résolveur par défaut. | Aucune pour des appels à `localhost`. |
-
-**Pistes pour les formules illisibles**, de la plus simple à la plus lourde :
-
-1. Supprimer les caractères irrécupérables (zone d'usage privé Unicode `\p{Co}`, caractère de remplacement `�`) pour qu'ils ne polluent pas les vecteurs.
-2. Ingérer la **source** du PDF (Word, LaTeX, HTML) quand elle existe.
-3. Faire retranscrire les pages concernées par un **modèle multimodal** (image de la page → Markdown + LaTeX), en ne traitant que les pages signalées par les warnings.
-4. Des outils spécialisés d'analyse de documents (souvent en Python).
-
-Les messages PDFBox peuvent être réduits avec `logging.level.org.apache.pdfbox.pdmodel.font=ERROR`.
-
 ## Évaluer le RAG
 
 Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il **retrouve les bons mais répond mal**. On les teste séparément, en commençant par la recherche.
@@ -342,21 +337,45 @@ Un RAG peut échouer à deux endroits : il **retrouve les mauvais fils**, ou il 
 ### Le banc d'évaluation de la recherche
 
 - **Jeu d'évaluation** : `src/test/resources/evaluation/retrieval-questions.json`, 10 questions réelles, chacune avec ses formulations par langue (`"variants": {"fr": […], "en": […]}`) et le ou les fils de référence (`expectedThreadIds`) vérifiés à la main. Les traductions anglaises sont fidèles, sans vocabulaire tiré des fils.
-- **Test** : `RetrievalEvaluationTest` interroge la recherche avec une profondeur de 30, classe les résultats par fil distinct, puis affiche, **pour chaque langue**, le rang de la première référence pour chaque question (le pire rang si une langue a plusieurs formulations), ainsi que :
+- **Test** : `RetrievalEvaluationTest` interroge **deux recherches** à la même profondeur de 30, la recherche **dense** seule et la recherche **hybride** (dense + mots-clés, fusion RRF), classe les résultats par fil distinct, puis affiche, **pour chaque langue et chaque recherche**, le rang de la première référence pour chaque question (le pire rang si une langue a plusieurs formulations), ainsi que :
   - **Hit@5** et **Hit@10** : part des questions dont une référence est dans les 5 (ou 10) premiers fils ;
-  - **MRR** : moyenne de 1/rang de la première référence.
+  - **MRR** : moyenne de 1/rang de la première référence ;
+  - les **mots-clés extraits** par le LLM pour chaque formulation (l'extraction n'est pas déterministe : ils expliquent un écart de rang, et un petit écart peut n'être que du bruit). Le test espionne `KeywordExtractor` (`@MockitoSpyBean`) pour les noter sans changer son comportement. Il lance un appel au LLM par formulation : `ANTHROPIC_API_KEY` doit être définie.
 - **Lancement** (il interroge la vraie base et Ollama, d'où la variable qui l'active) :
   ```bash
   RAG_EVALUATION=true ./mvnw test -Dtest=RetrievalEvaluationTest
   ```
 
-Mesure actuelle : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
+Mesure actuelle, recherche dense seule : Hit@5 60 %, Hit@10 70 %, MRR 0,457 en français ; 60 %, 70 %, 0,453 en anglais. Les moyennes sont identiques, mais certaines questions bougent de plus de 10 rangs d'une langue à l'autre : lire les rangs question par question (voir E14). Les questions 5, 9 et 10 échouent : leurs références sont dans le top 30 mais mal classées. Recherche hybride (dense + mots-clés, RRF), une seule exécution : 80 %, 90 %, 0,560 en français ; 70 %, 80 %, 0,419 en anglais, soit un gain net en français et un bilan mitigé en anglais (voir E17). L'historique complet est dans la section « Historique des mesures » du [journal](docs/rag-journal.md).
 
 ⚠️ Ne jamais reprendre une question du jeu comme exemple dans un prompt : on ajusterait le système au jeu d'évaluation (sur-apprentissage), et les mesures ne vaudraient plus rien.
 
-### Exploration : extraction de mots-clés (E13)
+### Recherche par mots-clés (brique de la recherche hybride, E15)
 
-`KeywordExtractionExplorationTest` affiche les mots-clés qu'un LLM extrait de chaque question du jeu, avec le prompt `src/main/resources/prompts/keyword-extraction.st`. Il a servi à explorer la recherche par mots-clés, dont l'hypothèse a été réfutée (voir E13). Il appelle Anthropic : `ANTHROPIC_API_KEY` doit être définie dans l'environnement.
+`KeywordSearchService.searchByKeywords(keywords, limit)` est la seconde recherche de la recherche hybride : elle retourne des **identifiants de fils** classés, qui seront fusionnés avec ceux de la recherche dense par `ReciprocalRankFusion`. Elle n'est pas encore branchée sur `/rag/related-chunks` ni sur le banc d'évaluation.
+
+Comportement :
+
+- les mots-clés sont découpés comme la base découpe le texte (minuscules, coupure sur tout ce qui n'est pas lettre ou chiffre : `api-key` donne `api` et `key`), dédoublonnés **après** le découpage, et passés à la base comme **paramètre**, jamais concaténés au SQL ;
+- un chunk est retenu s'il contient **au moins un** mot-clé (OU) ;
+- chaque mot vaut son **IDF** (`ln(nombre de chunks / chunks contenant le mot)`), calculé par `ts_stat` : un mot rare pèse plus qu'un mot fréquent ;
+- le score d'un fil est celui de son **meilleur chunk** (somme des IDF des mots-clés qu'il contient) ;
+- tri par score, puis par date décroissante, puis par identifiant : l'ordre est déterministe ;
+- seuls les fils avec `responderReplyCount > 0` sont retournés ; `limit` compte des **fils**, pas des chunks.
+
+La requête SQL est expliquée pas à pas dans la Javadoc du service et dans le [journal](docs/rag-journal.md) (E15).
+
+`KeywordExtractor` prépare les mots-clés à partir de la question. Il sépare deux rôles : le LLM propose des mots (`extract` : la question part telle quelle, la réponse est lue en sortie structurée `List<String>`), puis `normalize` applique une politique **déterministe** (retire les mots qui tombent sur les masques d'anonymisation `ip`, `host`, `uuid`, `redacted`, ignore les vides, plafonne à 8 mots). Le découpage des mots composés n'est **pas** dans l'extracteur : il est dans le service de recherche, qui doit tokeniser comme la base (voir E16). `normalize` est une fonction pure testée sans mock (`KeywordExtractorTest`).
+
+Ses tests (`KeywordSearchServiceTest`) tournent sur un vrai PostgreSQL avec pgvector lancé par **Testcontainers** : Docker (Colima sur Mac) doit donc être démarré, et la base de l'application n'est pas utilisée.
+
+```bash
+./mvnw test -Dtest=KeywordSearchServiceTest
+```
+
+### Exploration : extraction de mots-clés (E13, E16)
+
+`KeywordExtractionExplorationTest` affiche les mots-clés que `KeywordExtractor` extrait de chaque question du jeu, avec le prompt `src/main/resources/prompts/keyword-extraction.st`. Il a servi à explorer la recherche par mots-clés, dont l'hypothèse a été réfutée (voir E13), puis à vérifier l'extracteur (E16). Il appelle Anthropic : `ANTHROPIC_API_KEY` doit être définie dans l'environnement.
 
 ```bash
 RAG_EVALUATION=true ./mvnw test -Dtest=KeywordExtractionExplorationTest
@@ -374,7 +393,7 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 
 - [x] Infrastructure : PostgreSQL + pgvector via Docker Compose
 - [x] Configuration Spring AI : datasource, Ollama, pgvector, Anthropic
-- [x] Ingestion d'un PDF (première phase)
+- [x] Première phase sur un livre PDF (code retiré, leçons dans E1)
 - [x] Ingestion de l'historique Slack : un document par fil, découpage à 1500 tokens
 - [x] Contexte effectif d'Ollama porté à 8192 tokens (`bge-m3-8k`)
 - [x] Ingestion désactivable et idempotente
@@ -384,8 +403,10 @@ Ce qui a été essayé, mesuré et appris en construisant ce RAG est consigné d
 - [x] Banc d'évaluation de la recherche (Hit@5, Hit@10, MRR)
 - [x] Exploration de la recherche par mots-clés : hypothèse réfutée (E13)
 - [x] Questions d'évaluation en français et en anglais : pas d'effet de langue moyen, forte sensibilité à la formulation (E14)
+- [x] Code réorganisé par fonctionnalité (`ingestion`, `retrieval`, `generation`, `api`)
 - [ ] Mesure du bruit de formulation (reformulations dans la même langue)
 - [ ] Reranking des 30 premiers candidats
+- [x] Recherche hybride (branche `feature/hybrid-search`, pour apprendre la technique) : fusion RRF, recherche par mots-clés (E15), extraction des mots-clés par un LLM (E16), assemblage et comparaison dense / hybride (E17). Elle rend des fils et n'est pas branchée sur `/rag/ask`, qui demanderait de charger le texte d'un fil
 - [ ] Évaluation de la génération
 - [ ] Refactoring en architecture hexagonale
 - [ ] Comparaison avec l'advisor Spring AI (`QuestionAnswerAdvisor`)

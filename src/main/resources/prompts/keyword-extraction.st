@@ -8,7 +8,8 @@ Rules:
 - Keep technical terms, error codes, environment names and product names exactly as written (504, prep, uat, kong, swagger).
 - Add a close synonym only when threads commonly use it instead of the question's word (401 -> unauthorized, token -> jwt).
 - Leave out generic words that appear in almost every thread: api, devportal, hello, problem, issue, help.
-- Each keyword must be a single word.
+- Leave out ip, host, uuid and redacted: they only match the placeholders ([IP], [HOST], [UUID], [REDACTED]) that replace real values in the threads.
+- Each keyword must be a single word, with no hyphen, space or punctuation. Split a compound term into its parts (rate-limit -> rate, limit).
 
 Example
 Question: Mon application reçoit une erreur 429 quand elle appelle l'API en PROD, faut-il augmenter le quota ?
