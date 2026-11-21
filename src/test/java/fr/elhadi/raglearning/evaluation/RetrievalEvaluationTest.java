@@ -3,6 +3,7 @@ package fr.elhadi.raglearning.evaluation;
 import fr.elhadi.raglearning.retrieval.HybridRetrievalService;
 import fr.elhadi.raglearning.retrieval.RetrievalService;
 import fr.elhadi.raglearning.retrieval.keyword.KeywordExtractor;
+import fr.elhadi.raglearning.retrieval.keyword.KeywordSearchService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfEnvironmentVariable;
@@ -13,10 +14,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.DoubleSummaryStatistics;
-import java.util.HashMap;
 import java.util.IntSummaryStatistics;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
@@ -25,6 +24,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.OptionalInt;
 import java.util.SequencedSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
 import java.util.function.BiFunction;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -32,6 +36,8 @@ import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 
@@ -77,6 +83,13 @@ class RetrievalEvaluationTest {
     /** Profondeur de recherche : au-delà du topK de production, pour voir les fils « presque trouvés ». */
     private static final int SEARCH_DEPTH = 30;
 
+    /**
+     * Nombre d'extractions de mots-clés lancées en même temps au début de chaque exécution. Chaque appel attend
+     * la réponse du LLM : en lancer plusieurs à la fois raccourcit le banc, mais une valeur trop haute expose
+     * aux limites de débit de l'API (erreur 429, comptée comme un échec d'extraction).
+     */
+    private static final int EXTRACTION_PARALLELISM = 8;
+
     /** Variable d'environnement qui fixe le nombre d'exécutions de toute la mesure. */
     private static final String RUNS_ENV = "RAG_EVALUATION_RUNS";
 
@@ -100,6 +113,9 @@ class RetrievalEvaluationTest {
                   Les lignes hybrides d'une même exécution partagent les mêmes mots-clés
           Hit@5   part des questions dont un fil de référence est dans les 5 premiers (moyenne des exécutions)
           Hit@10  idem pour les 10 premiers, c'est-à-dire le contexte réellement envoyé au LLM
+          Questions « common » / « rare-term »  les indicateurs sont séparés : « rare-term » regroupe les questions
+                  qui contiennent un terme que très peu de fils contiennent (champ category du jeu), cas pour lequel
+                  la recherche par mots-clés existe. Les réglages faits sur « common » se vérifient sur « rare-term »
           MRR     Mean Reciprocal Rank : moyenne de 1/rang (0 si absent) ; min, moyenne et max de l'exécution.
                   1 = toujours premier, 0,5 = en moyenne deuxième, 0,1 = en moyenne dixième.
                   L'écart max - min est le bruit de la mesure : une différence entre deux recherches
@@ -113,8 +129,16 @@ class RetrievalEvaluationTest {
     private record Strategy(String name, BiFunction<String, Integer, List<String>> search) {
     }
 
-    @Autowired
+    /**
+     * Espion : la recherche dense est déterministe, le banc la calcule une seule fois par question. Sans cela,
+     * chaque stratégie recalculerait l'embedding de la même question à chaque exécution.
+     */
+    @MockitoSpyBean
     private RetrievalService retrievalService;
+
+    /** Espion : même raison, une liste de mots-clés donne toujours les mêmes fils (la requête parcourt tout le corpus). */
+    @MockitoSpyBean
+    private KeywordSearchService keywordSearchService;
 
     @Autowired
     private HybridRetrievalService hybridRetrievalService;
@@ -124,16 +148,22 @@ class RetrievalEvaluationTest {
     private KeywordExtractor keywordExtractor;
 
     /** Pour chaque question, les mots-clés produits à chaque exécution (une liste par appel du LLM). */
-    private final Map<String, List<List<String>>> keywordsByQuestion = new LinkedHashMap<>();
+    private final Map<String, List<List<String>>> keywordsByQuestion = new ConcurrentHashMap<>();
 
     /** Pour chaque question, le message de chaque échec de l'extraction (le LLM n'a pas rendu un JSON lisible). */
-    private final Map<String, List<String>> extractionFailuresByQuestion = new LinkedHashMap<>();
+    private final Map<String, List<String>> extractionFailuresByQuestion = new ConcurrentHashMap<>();
 
     /** Mots-clés déjà tirés pour chaque question dans l'exécution en cours, réutilisés par toutes les pondérations. */
-    private final Map<String, List<String>> extractionsInCurrentRun = new HashMap<>();
+    private final Map<String, List<String>> extractionsInCurrentRun = new ConcurrentHashMap<>();
 
     /** Échecs déjà subis dans l'exécution en cours : un second appel ne doit pas réussir là où le premier a échoué. */
-    private final Map<String, ExtractionFailed> failuresInCurrentRun = new HashMap<>();
+    private final Map<String, ExtractionFailed> failuresInCurrentRun = new ConcurrentHashMap<>();
+
+    /** Fils trouvés par la recherche dense, par question et profondeur : calculés une fois pour tout le banc. */
+    private final Map<String, List<String>> denseSearches = new ConcurrentHashMap<>();
+
+    /** Fils trouvés par la recherche par mots-clés, par liste de mots et profondeur : calculés une fois pour tout le banc. */
+    private final Map<List<Object>, List<String>> keywordSearches = new ConcurrentHashMap<>();
 
     /**
      * Échec de l'extraction des mots-clés, signalé par l'espion. Le banc l'attrape pour le compter au lieu de
@@ -165,16 +195,44 @@ class RetrievalEvaluationTest {
             try {
                 final List<String> keywords = (List<String>) invocation.callRealMethod();
                 extractionsInCurrentRun.put(question, keywords);
-                keywordsByQuestion.computeIfAbsent(question, ignored -> new ArrayList<>()).add(keywords);
+                keywordsByQuestion.computeIfAbsent(question, ignored -> new CopyOnWriteArrayList<>()).add(keywords);
                 return keywords;
             } catch (RuntimeException failure) {
                 final String message = String.valueOf(failure.getMessage()).lines().findFirst().orElse("").strip();
-                extractionFailuresByQuestion.computeIfAbsent(question, ignored -> new ArrayList<>()).add(message);
+                extractionFailuresByQuestion.computeIfAbsent(question, ignored -> new CopyOnWriteArrayList<>()).add(message);
                 final ExtractionFailed failed = new ExtractionFailed(message, failure);
                 failuresInCurrentRun.put(question, failed);
                 throw failed;
             }
         }).when(keywordExtractor).extract(anyString());
+    }
+
+    @BeforeEach
+    @SuppressWarnings("unchecked")
+    void cacheDeterministicSearches() {
+        doAnswer(invocation -> {
+            final String question = invocation.getArgument(0);
+            final int depth = invocation.getArgument(1);
+            final String key = question + "|" + depth;
+            List<String> threadIds = denseSearches.get(key);
+            if (threadIds == null) {
+                threadIds = (List<String>) invocation.callRealMethod();
+                denseSearches.put(key, threadIds);
+            }
+            return threadIds;
+        }).when(retrievalService).findRelatedThreadIds(anyString(), anyInt());
+
+        doAnswer(invocation -> {
+            final List<String> keywords = invocation.getArgument(0);
+            final int limit = invocation.getArgument(1);
+            final List<Object> key = List.of(keywords, limit);
+            List<String> threadIds = keywordSearches.get(key);
+            if (threadIds == null) {
+                threadIds = (List<String>) invocation.callRealMethod();
+                keywordSearches.put(key, threadIds);
+            }
+            return threadIds;
+        }).when(keywordSearchService).searchByKeywords(anyList(), anyInt());
     }
 
     /** Oublie les mots-clés de l'exécution précédente : chaque exécution tire sa propre extraction. */
@@ -201,7 +259,19 @@ class RetrievalEvaluationTest {
      * Une question du jeu : ses formulations par langue et les fils qui y répondent.
      * Jackson produit une {@link LinkedHashMap} : l'ordre des langues est celui du fichier.
      */
-    record EvaluationCase(Map<String, List<String>> variants, List<String> expectedThreadIds) {
+    record EvaluationCase(String category, Map<String, List<String>> variants, List<String> expectedThreadIds) {
+
+        /** Catégorie des questions sans champ {@code category} dans le jeu : les questions d'origine. */
+        static final String DEFAULT_CATEGORY = "common";
+
+        /**
+         * Nature de la question : {@code common} (vocabulaire courant du canal) ou {@code rare-term} (elle contient
+         * un terme que très peu de fils contiennent). Les indicateurs sont rapportés par catégorie, parce que la
+         * recherche par mots-clés sert surtout la seconde.
+         */
+        String categoryName() {
+            return category == null ? DEFAULT_CATEGORY : category;
+        }
 
         List<String> variantsIn(String language) {
             return variants.getOrDefault(language, List.of());
@@ -235,13 +305,48 @@ class RetrievalEvaluationTest {
         final int runCount = runCount();
         final List<List<CaseResult>> runs = IntStream.rangeClosed(1, runCount)
             .mapToObj(run -> {
-                System.out.printf("Exécution %d/%d…%n", run, runCount);
+                final long start = System.nanoTime();
                 startRun();
-                return cases.stream().map(evaluationCase -> evaluate(evaluationCase, languages)).toList();
+                prefetchKeywords(cases);
+                final List<CaseResult> results = cases.stream()
+                    .map(evaluationCase -> evaluate(evaluationCase, languages))
+                    .toList();
+                System.out.printf("Exécution %d/%d terminée en %.1f s%n", run, runCount, (System.nanoTime() - start) / 1e9);
+                return results;
             })
             .toList();
 
         System.out.println(report(runs, languages));
+    }
+
+    /**
+     * Extrait en parallèle les mots-clés de toutes les formulations, avant les recherches de l'exécution.
+     * Les appels au LLM sont les seuls longs et indépendants ; les recherches qui suivent, séquentielles,
+     * retrouvent chaque extraction (ou chaque échec) dans la mémoire de l'exécution, que l'espion remplit.
+     * Les formulations identiques (par exemple la même requête en français et en anglais) ne sont extraites
+     * qu'une fois.
+     */
+    private void prefetchKeywords(List<EvaluationCase> cases) {
+        final List<String> questions = cases.stream()
+            .flatMap(evaluationCase -> evaluationCase.variants().values().stream())
+            .flatMap(List::stream)
+            .distinct()
+            .toList();
+        final Semaphore permits = new Semaphore(EXTRACTION_PARALLELISM);
+        try (ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (String question : questions) {
+                executor.submit(() -> {
+                    permits.acquireUninterruptibly();
+                    try {
+                        keywordExtractor.extract(question);
+                    } catch (ExtractionFailed alreadyRecorded) {
+                        // L'espion l'a noté ; il le rejouera pour chaque stratégie de cette exécution.
+                    } finally {
+                        permits.release();
+                    }
+                });
+            }
+        }
     }
 
     /** Nombre d'exécutions demandé par {@value #RUNS_ENV}, {@value #DEFAULT_RUNS} par défaut. */
@@ -323,10 +428,34 @@ class RetrievalEvaluationTest {
                     report.append(String.format(Locale.ROOT, "%-17s", rankSummary(runs, index, strategy, language)));
                 }
             }
-            report.append(abbreviate(firstRun.get(index).evaluationCase().label())).append('\n');
+            final EvaluationCase evaluationCase = firstRun.get(index).evaluationCase();
+            final String marker = EvaluationCase.DEFAULT_CATEGORY.equals(evaluationCase.categoryName())
+                ? "" : "[" + evaluationCase.categoryName() + "] ";
+            report.append(marker).append(abbreviate(evaluationCase.label())).append('\n');
         }
 
-        report.append(String.format(Locale.ROOT, "%n%-6s %-11s %9s %10s %9s %9s %9s%n",
+        for (String category : categoriesOf(firstRun)) {
+            final List<List<CaseResult>> runsOfCategory = runs.stream()
+                .map(run -> run.stream().filter(result -> result.evaluationCase().categoryName().equals(category)).toList())
+                .toList();
+            report.append(String.format(Locale.ROOT, "%nQuestions « %s » (%d)%n", category, runsOfCategory.getFirst().size()));
+            report.append(metricsTable(runsOfCategory, languages, strategyNames));
+        }
+
+        report.append(extractionFailures(firstRun, languages));
+        report.append(extractedKeywords(firstRun, languages));
+        report.append(LEGEND);
+        return report.toString();
+    }
+
+    /** Les catégories présentes dans le jeu, dans l'ordre où elles apparaissent. */
+    private List<String> categoriesOf(List<CaseResult> results) {
+        return results.stream().map(result -> result.evaluationCase().categoryName()).distinct().toList();
+    }
+
+    /** Hit@5, Hit@10 et MRR par langue et par recherche, moyennés (et min/max pour le MRR) sur les exécutions. */
+    private String metricsTable(List<List<CaseResult>> runs, SequencedSet<String> languages, List<String> strategyNames) {
+        final StringBuilder table = new StringBuilder(String.format(Locale.ROOT, "%-6s %-11s %9s %10s %9s %9s %9s%n",
             "Langue", "Recherche", "Hit@5 moy", "Hit@10 moy", "MRR min", "MRR moy", "MRR max"));
         for (String language : languages) {
             for (String strategy : strategyNames) {
@@ -336,7 +465,7 @@ class RetrievalEvaluationTest {
                     .mapToDouble(run -> hitRate(run, strategy, language, 10)).summaryStatistics();
                 final DoubleSummaryStatistics mrr = runs.stream()
                     .mapToDouble(run -> meanReciprocalRank(run, strategy, language)).summaryStatistics();
-                report.append(String.format(Locale.ROOT, "%-6s %-11s %8.0f%% %9.0f%% %9.3f %9.3f %9.3f%n",
+                table.append(String.format(Locale.ROOT, "%-6s %-11s %8.0f%% %9.0f%% %9.3f %9.3f %9.3f%n",
                     language.toUpperCase(Locale.ROOT),
                     strategy,
                     100 * hit5.getAverage(),
@@ -346,11 +475,7 @@ class RetrievalEvaluationTest {
                     mrr.getMax()));
             }
         }
-
-        report.append(extractionFailures(firstRun, languages));
-        report.append(extractedKeywords(firstRun, languages));
-        report.append(LEGEND);
-        return report.toString();
+        return table.toString();
     }
 
     /** Min/moyenne/max, sur les exécutions, du rang d'une question ; l'absence de rang compte pour la profondeur + 1. */

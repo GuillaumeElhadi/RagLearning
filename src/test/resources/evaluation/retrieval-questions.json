@@ -91,5 +91,165 @@
     "expectedThreadIds": [
       "1743867575.276269"
     ]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Après la désactivation de mon LDAP, je ne vois plus l'application que je gérais dans DevPortal en PREP, UAT et SIT. Quel problème d'appartenance au groupe Data Finder faut-il corriger ?"],
+      "en": ["After my LDAP account was disabled, I can no longer see the application I managed in DevPortal for PREP, UAT, and SIT. What Data Finder group membership issue needs to be fixed?"]
+    },
+    "expectedThreadIds": ["1741170845.844709"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Pour CCR Wait And Retrieve Task (WART v1), les credentials des applications SIT et UAT sont créés avec Ping PROD. Comment faut-il corriger la configuration Ping de ces environnements ?"],
+      "en": ["For CCR Wait And Retrieve Task (WART v1), application credentials in SIT and UAT are created with Ping PROD. How should the Ping configuration for these environments be corrected?"]
+    },
+    "expectedThreadIds": ["1790345175.698539"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Pourquoi DevPortal ne parvient-il pas à charger la documentation OpenAPI depuis une URL Kubernetes en `.svc.cluster.local:8080/v3/api-docs`, alors que cela fonctionne en QA ?"],
+      "en": ["Why can't DevPortal load OpenAPI documentation from a Kubernetes `.svc.cluster.local:8080/v3/api-docs` URL when it works in QA?"]
+    },
+    "expectedThreadIds": ["1788958128.229099"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Dans Kazaplan en PREP et SIT, le flux d'authentification via DevPortal utilise un `redirect_uri` inattendu. Pourquoi ?"],
+      "en": ["In Kazaplan PREP and SIT, the authentication flow through DevPortal uses an unexpected `redirect_uri`. Why?"]
+    },
+    "expectedThreadIds": ["1789654821.122789"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Avec le renouvellement automatique de la clé API pour KanPaI, l'ancienne clé de Kobi registry reste en PREP et la synchronisation Vault est en attente en SIT. Que faut-il vérifier ?"],
+      "en": ["With automatic API key renewal for KanPaI, the old Kobi registry key remains in PREP and Vault synchronization is pending in SIT. What should be checked?"]
+    },
+    "expectedThreadIds": ["1753975995.296429"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Un partenaire externe obtient une erreur 403 en appelant l'API Mailbrew via Ping UAT. Son IP est autorisée dans DevPortal : pourquoi faut-il aussi vérifier la whitelist Fastly ?"],
+      "en": ["An external partner gets a 403 when calling the Mailbrew API through Ping UAT. Its IP is allowed in DevPortal: why should the Fastly whitelist also be checked?"]
+    },
+    "expectedThreadIds": ["1788934562.938569"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Pour un appel à l'adresse privée de l'API `api-boitata/v2`, l'erreur 502 dépend de la présence du header `Cookie`. DataDome intervient-il sur ce chemin privé ?"],
+      "en": ["For a call to the private address of `api-boitata/v2`, the 502 error depends on whether the `Cookie` header is present. Is DataDome involved in this private path?"]
+    },
+    "expectedThreadIds": ["1728477678.643859"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Comment rendre le header HTTP `Content-Range` accessible au JavaScript du navigateur lorsque la réponse de l'API le contient déjà ?"],
+      "en": ["How can the HTTP `Content-Range` header be made accessible to browser JavaScript when it is already present in the API response?"]
+    },
+    "expectedThreadIds": ["1688127202.593459"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Dans l'API SCIM Third Party Creation, le bouton Try it out renvoie Unauthorized et la clé API copiée semble tronquée. Quelle correction a rétabli l'accès ?"],
+      "en": ["In the SCIM Third Party Creation API, Try it out returns Unauthorized and the copied API key appears truncated. What fix restored access?"]
+    },
+    "expectedThreadIds": ["1716468879.189529"]
+  },
+  {
+    "category": "rare-term",
+    "variants": {
+      "fr": ["Après l'ajout d'un endpoint et de sa documentation, Try it out affiche `Failed to fetch` avec une erreur CORS. Quelle configuration d'origine autorisée a résolu le problème ?"],
+      "en": ["After adding an endpoint and its documentation, Try it out shows `Failed to fetch` with a CORS error. What allowed-origin configuration resolved the issue?"]
+    },
+    "expectedThreadIds": ["1738069257.393309"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["LDAP désactivé Data Finder groupe"],
+      "en": ["LDAP disabled Data Finder group"]
+    },
+    "expectedThreadIds": ["1741170845.844709"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["WART v1 credentials Ping PROD SIT UAT"],
+      "en": ["WART v1 credentials Ping PROD SIT UAT"]
+    },
+    "expectedThreadIds": ["1790345175.698539"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["svc.cluster.local v3/api-docs DevPortal"],
+      "en": ["svc.cluster.local v3/api-docs DevPortal"]
+    },
+    "expectedThreadIds": ["1788958128.229099"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["Kazaplan redirect_uri PREP SIT"],
+      "en": ["Kazaplan redirect_uri PREP SIT"]
+    },
+    "expectedThreadIds": ["1789654821.122789"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["KanPaI Kobi registry clé API Vault"],
+      "en": ["KanPaI Kobi registry API key Vault"]
+    },
+    "expectedThreadIds": ["1753975995.296429"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["Mailbrew 403 Fastly whitelist"],
+      "en": ["Mailbrew 403 Fastly whitelist"]
+    },
+    "expectedThreadIds": ["1788934562.938569"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["api-boitata 502 Cookie DataDome"],
+      "en": ["api-boitata 502 Cookie DataDome"]
+    },
+    "expectedThreadIds": ["1728477678.643859"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["Content-Range CORS header exposé"],
+      "en": ["Content-Range CORS expose header"]
+    },
+    "expectedThreadIds": ["1688127202.593459"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["SCIM Third Party Creation Unauthorized"],
+      "en": ["SCIM Third Party Creation Unauthorized"]
+    },
+    "expectedThreadIds": ["1716468879.189529"]
+  },
+  {
+    "category": "short-query",
+    "variants": {
+      "fr": ["CORS Failed to fetch Try it out origine autorisée"],
+      "en": ["CORS Failed to fetch Try it out allowed origin"]
+    },
+    "expectedThreadIds": ["1738069257.393309"]
   }
 ]
