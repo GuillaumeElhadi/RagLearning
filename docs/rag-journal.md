@@ -413,6 +413,8 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 
 ### E17 — Recherche hybride : dense + mots-clés, fusion RRF (2026-11-20)
 
+> Mise à jour : cette mesure vient d'une seule exécution. E18 la répète 5 fois : le MRR français de 0,560 était une exécution favorable (moyenne 0,467), les conclusions sont à lire avec E18.
+
 - **Constat** : la recherche dense classe mal les questions 5, 9 et 10 (rangs 18, 12 et 26 en français). E13 avait réfuté l'idée d'une recherche par mots-clés **seule** et prévoyait que la fusion ne ferait pas mieux sur ce jeu.
 - **Hypothèse** : fusionner le classement dense (30 chunks, ramenés à des fils) et le classement par mots-clés (30 fils) avec la RRF (constante 60) fait remonter une référence que les mots-clés repèrent même si la dense la classe mal. Le risque, déjà vu en E13 : des mots génériques font redescendre une référence que la dense classait bien.
 - **Changement** :
@@ -455,6 +457,200 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
   - les mots-clés génériques sont le principal risque d'une recherche hybride sur un corpus de domaine.
 - **Suite possible** : mesurer le bruit (répéter l'exécution, ajouter des reformulations), pondérer la dense plus fortement que les mots-clés dans la fusion ou réduire la profondeur de la recherche par mots-clés, ajouter des questions à terme rare, puis le reranking.
 
+### E18 — Bruit de la recherche hybride : 5 exécutions (2026-11-20)
+
+- **Constat** : E17 repose sur une seule exécution, alors que l'extraction des mots-clés par un LLM n'est pas déterministe. Impossible de savoir quels écarts sont réels.
+- **Hypothèse** : les rangs de la recherche dense sont stables, ceux de l'hybride varient d'une exécution à l'autre. Si la variation est comparable à l'écart avec la dense, E17 ne prouve rien.
+- **Changement** : le banc répète toute la mesure N fois (`RAG_EVALUATION_RUNS`, 5 par défaut) et rapporte, par question, le min, la moyenne et le max du rang, puis le min, la moyenne et le max du MRR. Il compte aussi les échecs d'extraction (JSON illisible) au lieu de s'arrêter : une première exécution s'était arrêtée sur une réponse du LLM commençant par « Wait… ».
+- **Mesure** (5 exécutions, rang `min/moyenne/max`) :
+
+  | # | FR dense | FR hybrid | EN dense | EN hybrid |
+  |---|---|---|---|---|
+  | 1 | 1 | 1/2,6/9 | 1 | 1/3,8/9 |
+  | 2 | 4 | 1/1,4/3 | 16 | 2/2,8/3 |
+  | 3 | 2 | 2/2,4/3 | 4 | 1/1,4/3 |
+  | 4 | 2 | 2/3,0/4 | 2 | 2/4,8/7 |
+  | 5 | 18 | 3/10,2/>30 | 22 | 7/7,0/7 |
+  | 6 | 1 | 1/1,0/1 | 1 | 1/1,0/1 |
+  | 7 | 1 | 6/6,8/7 | 1 | 3/7,8/9 |
+  | 8 | 7 | 1/2,4/3 | 2 | 1/2,0/4 |
+  | 9 | 12 | 25/25,0/25 | 9 | 22/22,4/24 |
+  | 10 | 26 | 3/3,0/3 | 17 | >30/31,0/>30 |
+
+  | Langue | Recherche | Hit@5 (moy.) | Hit@10 (moy.) | MRR min | MRR moy. | MRR max |
+  |---|---|---|---|---|---|---|
+  | FR | dense | 60 % | 70 % | 0,457 | 0,457 | 0,457 |
+  | FR | hybrid | 72 % | 88 % | 0,387 | 0,467 | 0,502 |
+  | EN | dense | 60 % | 70 % | 0,453 | 0,453 | 0,453 |
+  | EN | hybrid | 54 % | 80 % | 0,297 | 0,391 | 0,513 |
+
+  Échecs de l'extraction : 0 sur 100 appels.
+- **Lecture** :
+  - **la recherche dense est bien déterministe** (min = moyenne = max partout) : le banc sert de témoin ;
+  - **le bruit de l'hybride est large** : le MRR varie de 0,115 en français et de 0,216 en anglais d'une exécution à l'autre, plus que l'écart moyen avec la dense (+0,010 en français, −0,062 en anglais). **En moyenne, l'hybride ne fait pas mieux que la dense en MRR** ;
+  - **le MRR de 0,560 d'E17 est hors de la fourchette observée** (0,387 à 0,502) : c'était une exécution favorable, pas une valeur typique. La question 4 n'est jamais arrivée à 1 ici (min 2), alors qu'E17 l'avait en tête dans les deux langues ;
+  - **le gain en Hit@10 en français tient** (70 % → 88 % en moyenne) : l'hybride fait entrer des références dans le top 10, mais il fait aussi descendre des références que la dense plaçait en tête (questions 1, 4 et 7), d'où un MRR inchangé ;
+  - **effets stables, donc réels pour cette extraction** : gain sur les questions 2 (les deux langues), 3 en anglais, 5 en anglais, 8 en français et 10 en français ; perte sur les questions 7 et 9 (les deux langues, mots-clés quasi identiques à chaque exécution : `504`, `timeout`, `gateway`, `kong`, `upstream` sont banals dans ce canal) ;
+  - **effets instables** : questions 1, 4, 5 en français et 8 en anglais. Le rang de la question 5 en français va de 3 à plus de 30 selon les mots choisis ;
+  - **la question 10 se joue sur deux mots** : le LLM a produit `jwt` et `signature` dans 5 exécutions sur 5 en français (rang 3 à chaque fois) et dans 0 sur 5 en anglais (hors du top 30 à chaque fois). Le comportement est stable mais dépend de la langue de la question. `jwt` pourrait venir de l'exemple du prompt (`token -> jwt`), à vérifier ;
+  - **défaut connu confirmé** : le LLM colle des mots (`apikey`, 4 exécutions sur 5 pour la question 1 en anglais) ; ces mots ne correspondent à rien dans l'index, alors que `api` et `key` séparés pourraient.
+- **Réserves** : 5 exécutions et 10 questions. Aucun échec d'extraction sur 100 appels cette fois, mais une exécution précédente en avait eu un : le taux est faible, pas mesuré précisément. Les cinq exécutions ont toutes lieu avec la même configuration du LLM ; une température à 0 changerait le bruit.
+- **Leçons** :
+  - **une seule exécution d'un système non déterministe ne suffit pas** : E17 a surestimé l'hybride, parce que la fusion est sensible à la liste de mots que le LLM tire ce jour-là ;
+  - **séparer les effets stables des instables** : seuls les premiers peuvent guider un réglage. Un effet stable est un défaut du système (questions 7 et 9), un effet instable est du bruit ;
+  - **la moyenne du MRR cache deux mouvements opposés** : la fusion fait entrer des références dans le top 10 et en fait descendre d'autres ;
+  - **le témoin déterministe** (la dense) valide le protocole : si ses colonnes avaient bougé, la mesure aurait été fausse ;
+  - mesurer le taux d'échec d'une étape LLM avant de la brancher sur le chemin utilisateur.
+- **Suite possible** : réduire l'influence des mots-clés (pondérer la dense plus fortement dans la fusion, ou réduire leur profondeur) et vérifier que les questions 7 et 9 se redressent sans perdre les gains stables ; prompt contre les mots collés ; questions à terme rare ; repli sur la dense quand l'extraction échoue.
+
+### E19 — Pondérer la recherche dense dans la fusion (2026-11-20)
+
+- **Constat** : E18 a montré des pertes stables de l'hybride sur les questions 7 et 9 : des mots-clés banals (`504`, `timeout`, `gateway`, `kong`, `upstream`) font descendre des fils que la dense plaçait bien.
+- **Hypothèse** : donner plus de poids au classement dense dans la fusion limite l'influence des mots-clés génériques, et redresse ces questions sans perdre les gains stables d'E18 (questions 2, 8 et 10).
+- **Changement** :
+  - `ReciprocalRankFusion.fuse(rankings, weights, rankConstant)` : chaque classement a un poids entier, l'élément à la position `p` marque `poids / (p + 1 + k)` ; `fuse(rankings, k)` garde les poids à 1 ;
+  - `HybridRetrievalService.findRelatedThreadIds(question, depth, denseWeight, keywordWeight)` ; la méthode à deux paramètres garde les poids 1:1, donc **le comportement par défaut ne change pas** ;
+  - le banc compare `dense`, `hybrid 1:1`, `hybrid 2:1` et `hybrid 4:1` (rapport dense:mots-clés). Au sein d'une exécution, les trois pondérations **partagent la même extraction** de mots-clés : la comparaison est appariée, le bruit du LLM n'y entre pas.
+- **Mesure** (5 exécutions, rang moyen ; la recherche dense et la ligne 1:1 reproduisent E18) :
+
+  | # | FR dense | FR 1:1 | FR 2:1 | FR 4:1 | EN dense | EN 1:1 | EN 2:1 | EN 4:1 |
+  |---|---|---|---|---|---|---|---|---|
+  | 1 | 1 | 3,0 | 3,0 | 2,4 | 1 | 2,4 | 2,4 | 1,6 |
+  | 2 | 4 | 1,2 | 1,0 | 1,0 | 16 | 2,8 | 2,8 | 2,8 |
+  | 3 | 2 | 2,2 | 2,2 | 1,2 | 4 | 1,8 | 1,8 | 1,8 |
+  | 4 | 2 | 2,2 | 1,8 | 1,6 | 2 | 3,6 | 2,0 | 1,8 |
+  | 5 | 18 | 4,6 | 4,6 | 4,8 | 22 | 7,0 | 7,0 | 9,0 |
+  | 6 | 1 | 1,0 | 1,0 | 1,0 | 1 | 1,0 | 1,0 | 1,0 |
+  | 7 | 1 | 6,8 | 6,8 | 2,8 | 1 | 9,0 | 9,0 | 4,0 |
+  | 8 | 7 | 3,0 | 3,6 | 4,0 | 2 | 9,2 | 8,8 | 8,2 |
+  | 9 | 12 | 25,0 | 21,0 | 21,0 | 9 | 23,6 | 18,6 | 17,6 |
+  | 10 | 26 | 3,0 | 3,0 | 10,0 | 17 | 25,4 | 16,0 | 16,2 |
+
+  | Langue | Recherche | Hit@5 | Hit@10 | MRR min | MRR moy. | MRR max |
+  |---|---|---|---|---|---|---|
+  | FR | dense | 60 % | 70 % | 0,457 | 0,457 | 0,457 |
+  | FR | hybrid 1:1 | 76 % | 90 % | 0,354 | 0,475 | 0,555 |
+  | FR | hybrid 2:1 | 76 % | 90 % | 0,397 | 0,486 | 0,556 |
+  | FR | hybrid 4:1 | 76 % | 90 % | 0,412 | **0,531** | 0,593 |
+  | EN | dense | 60 % | 70 % | 0,453 | 0,453 | 0,453 |
+  | EN | hybrid 1:1 | 56 % | 80 % | 0,250 | 0,380 | 0,496 |
+  | EN | hybrid 2:1 | 58 % | 80 % | 0,289 | 0,406 | 0,489 |
+  | EN | hybrid 4:1 | 70 % | 80 % | 0,339 | **0,433** | 0,495 |
+
+  Échecs de l'extraction : 1 sur 100 appels (question 8 en anglais, même message « Wait… » qu'en E18).
+- **Lecture** :
+  - **la pondération améliore le MRR de façon régulière** : de 1:1 à 4:1, +0,056 en français et +0,053 en anglais. Comme les pondérations partagent les mêmes mots-clés, cet écart n'est pas du bruit d'extraction ; il reste une mesure sur dix questions ;
+  - **les questions 7 et 1 sont redressées** : la 7 passe de 6,8 à 2,8 en français et de 9 à 4 en anglais, la 1 de 3,0 à 2,4 et de 2,4 à 1,6. Les questions 3 et 4 progressent aussi. La question 9 s'améliore sans retrouver la dense (21 contre 12 en français, 17,6 contre 9 en anglais) ;
+  - **le coût se voit sur la question 10 en français** : la référence passe du rang 3 (1:1 et 2:1) au rang 10 (4:1), pile à la limite du top 10. À 4:1, le gain venait d'un classement par mots-clés qui n'a plus assez de poids pour la remonter ; c'est exactement le cas pour lequel on fait une recherche par mots-clés. La question 5 en anglais recule un peu (7 → 9) ;
+  - **4:1 n'est pas un retour à la dense** : les gains des questions 2 (1,0 contre 4), 5 (4,8 contre 18), 8 en français et 10 en français (10 contre 26) subsistent ;
+  - **en français, l'hybride 4:1 dépasse la dense en moyenne** (0,531 contre 0,457) mais pas à chaque exécution (min 0,412). **En anglais, il reste en dessous** (0,433 contre 0,453) ;
+  - **l'échec d'extraction coûte environ 0,01 de MRR moyen en anglais** (la question 8 compte pour 0 dans cette exécution) : il élargit l'écart min/max sans changer l'ordre des pondérations.
+- **Réserves** :
+  - **le meilleur réglage a été choisi après avoir vu les résultats**, sur trois valeurs et dix questions : rien n'assure qu'il tienne sur d'autres questions. 4:1 n'est pas devenu le défaut du code ;
+  - **le jeu ne contient aucune question à terme rare** : il est justement incapable de montrer ce que coûte une dense lourde, alors que c'est le risque principal (voir la question 10) ;
+  - 5 exécutions et un seul échec : le taux d'échec d'environ 1 % reste approximatif.
+- **Leçons** :
+  - **une comparaison appariée** (mêmes mots-clés pour chaque pondération) isole l'effet du réglage du bruit du LLM, avec moins d'exécutions qu'une comparaison non appariée ;
+  - **la pondération échange un défaut contre un autre** : plus la dense pèse, moins les mots-clés peuvent rattraper un fil que la dense classe mal ;
+  - **un réglage ne se valide pas sur le jeu qui l'a guidé** : il faut des questions que le réglage n'a pas vues, et surtout des questions à terme rare ;
+  - **un échec d'extraction d'environ 1 %** (deux observations en E18 et E19) donnerait une erreur de temps en temps sur `/rag/ask` : il justifie un repli sur la dense avant de brancher l'hybride.
+- **Suite possible** : ajouter des questions à terme rare, puis revoir 4:1 ; repli sur la dense quand l'extraction échoue ; réduire la profondeur des mots-clés comme autre façon de limiter leur influence ; prompt contre les mots collés (`apikey`).
+
+### E20 — Questions à terme rare : le jeu passe à 20 questions (2026-11-20)
+
+- **Constat** : les dix questions d'origine ont un vocabulaire courant dans ce canal (`504`, `timeout`, `token`, `oauth`) : elles ne testent pas ce pour quoi on a ajouté la recherche par mots-clés. Le réglage 4:1 d'E19 a de plus été choisi sur ces mêmes questions.
+- **Hypothèse** : sur des questions qui contiennent un terme rare, la dense classe moins bien que l'hybride, et le poids 4:1 n'efface pas cet avantage.
+- **Changement** : dix questions ajoutées au jeu (11 à 20), chacune écrite à partir d'un fil contenant un terme rare (nom d'application, produit, identifiant, en-tête). Le jeu a un champ `category` (`rare-term`, défaut `common`) et le banc sépare les indicateurs par catégorie.
+- **Mesure** (5 exécutions, MRR moyen ; entre parenthèses, min à max) :
+
+  | Catégorie | Langue | Recherche | Hit@5 | Hit@10 | MRR |
+  |---|---|---|---|---|---|
+  | common | FR | dense | 60 % | 70 % | 0,457 |
+  | common | FR | hybrid 1:1 | 72 % | 90 % | 0,485 (0,464 à 0,510) |
+  | common | FR | hybrid 2:1 | 72 % | 90 % | 0,509 (0,458 à 0,561) |
+  | common | FR | hybrid 4:1 | 74 % | 90 % | 0,547 (0,490 à 0,598) |
+  | common | EN | dense | 60 % | 70 % | 0,453 |
+  | common | EN | hybrid 1:1 | 58 % | 82 % | 0,429 (0,298 à 0,569) |
+  | common | EN | hybrid 2:1 | 58 % | 82 % | 0,454 (0,334 à 0,629) |
+  | common | EN | hybrid 4:1 | 70 % | 82 % | 0,491 (0,372 à 0,671) |
+  | rare-term | FR | dense | 100 % | 100 % | 0,820 |
+  | rare-term | FR | hybrid 1:1 | 92 % | 98 % | 0,822 (0,770 à 0,870) |
+  | rare-term | FR | hybrid 2:1 | 92 % | 98 % | 0,813 (0,758 à 0,925) |
+  | rare-term | FR | hybrid 4:1 | 96 % | 98 % | 0,805 (0,758 à 0,867) |
+  | rare-term | EN | dense | 100 % | 100 % | 0,870 |
+  | rare-term | EN | hybrid 1:1 | 90 % | 100 % | 0,914 (0,914 à 0,914) |
+  | rare-term | EN | hybrid 2:1 | 90 % | 100 % | 0,914 (0,914 à 0,914) |
+  | rare-term | EN | hybrid 4:1 | 96 % | 100 % | 0,870 (0,867 à 0,875) |
+
+  Échecs de l'extraction : 3 sur 200 appels (question 8 en anglais, 2 fois ; question 13 en français, 1 fois), toujours le message « Wait… ».
+- **Lecture** :
+  - **l'hypothèse n'est pas confirmée, et le jeu ne peut pas la tester** : la dense seule place déjà une référence dans le top 5 pour 100 % des questions rares, avec un MRR de 0,82 en français et 0,87 en anglais. Il n'y a presque rien à gagner : effet de plafond. Les questions, écrites à partir d'un fil, reprennent beaucoup de son vocabulaire, et le modèle d'embedding retrouve ces fils sans l'aide des mots-clés ;
+  - **l'hybride ne fait pas mieux sur ces questions** : Hit@5 de 90 à 96 % contre 100 % pour la dense (il fait sortir une référence du top 5 dans certaines exécutions), MRR équivalent (+0,044 en anglais à 1:1 et 2:1, −0,015 à −0,02 en français, dans le bruit) ;
+  - **le poids 4:1 ne détruit pas ces questions** (0,805 contre 0,822 en français, 0,870 en anglais, identique à la dense) : la crainte née de la question 10 d'E19 n'est pas confirmée ici, mais le jeu est trop facile pour que cela prouve quoi que ce soit ;
+  - **sur les questions courantes, le classement des pondérations se reproduit** : 1:1 < 2:1 < 4:1 dans les deux langues, comme en E19. En français 4:1 reste au-dessus de la dense (0,547 contre 0,457) ;
+  - **les niveaux absolus bougent d'un lot de 5 exécutions à l'autre** : le MRR anglais de 1:1 passe de 0,380 (E19) à 0,429. Du coup, 4:1 en anglais est passé d'en dessous à au-dessus de la dense (0,433 puis 0,491, pour 0,453). **La moyenne de 5 exécutions a une incertitude d'environ 0,05** : l'avantage de l'hybride sur la dense en anglais n'est pas établi ;
+  - **l'extraction perd souvent le terme rare** : `kazaplan` (question 14) est extrait 5 fois sur 5 en français et 0 fois sur 5 en anglais ; `kanpai` ou `kobi` (question 15) 0 fois sur 5 en français et 4 fois sur 5 en anglais ; `mailbrew` (question 16) jamais, alors que `fastly` est toujours extrait. Le LLM ne sait pas quels mots sont rares dans le corpus : la règle du prompt (« garder les noms de produits tels quels ») est appliquée de façon irrégulière ;
+  - **les échecs d'extraction viennent surtout d'une question** : la question 8 en anglais a échoué 3 fois sur 15 appels depuis E18 (une fois en E19, deux fois en E20) ; le taux global est de 4 sur 400 appels (1 %).
+- **Réserves** :
+  - le tableau des rangs par question n'a pas été relu pour ce lot : on ne sait pas quelles questions rares quittent le top 5 ;
+  - les dix nouvelles questions sont écrites par la même personne, à partir de fils choisis pour contenir un terme rare ;
+  - le jeu reste petit (20 questions) et 5 exécutions ne suffisent pas à départager des écarts de 0,02.
+- **Leçons** :
+  - **un jeu « à terme rare » ne l'est vraiment que si la dense échoue** : une question longue, qui reprend le vocabulaire du fil, est facile pour un bon modèle d'embedding. Il faut mesurer la dense sur le jeu avant de croire qu'il teste autre chose ;
+  - **on ne valide pas un réglage sur un jeu trop facile** : le non-recul de 4:1 ici ne dit rien du cas difficile ;
+  - **l'écart entre deux lots de 5 exécutions est l'incertitude de la mesure** : un classement qui se reproduit (1:1 < 2:1 < 4:1) est plus solide qu'une valeur absolue ;
+  - **l'extraction par LLM ne voit pas le corpus** : elle n'a aucun moyen de savoir quels mots sont rares, ce que l'IDF sait.
+- **Suite possible** : des requêtes courtes, de type identifiant (« fastly whitelist », « wart », « kazaplan redirect_uri »), pour lesquelles la dense a moins de contexte ; une extraction qui s'appuie sur l'IDF du corpus (garder les mots de la question les plus rares), éventuellement après traduction ; repli sur la dense quand l'extraction échoue.
+
+### E21 — Requêtes courtes de type identifiant (2026-11-21)
+
+- **Constat** : en E20, la dense réussissait déjà presque toutes les questions à terme rare (Hit@5 100 %) : des questions longues, qui reprennent le vocabulaire du fil, ne montrent pas l'intérêt de la recherche par mots-clés.
+- **Hypothèse** : sur des requêtes courtes, de quelques mots dont un terme rare (« Mailbrew 403 Fastly whitelist »), la dense a peu de contexte et classe moins bien ; l'hybride rattrape.
+- **Changement** : dix requêtes courtes ajoutées au jeu (catégorie `short-query`), une par fil des questions 11 à 20, écrites avec les termes déjà présents dans ces questions. Le banc passe à 30 questions ; il mémorise les recherches dense et par mots-clés (déterministes) et extrait les mots-clés en parallèle.
+- **Mesure** (5 exécutions) :
+
+  | Langue | Recherche | Hit@5 | Hit@10 | MRR min | MRR moy. | MRR max |
+  |---|---|---|---|---|---|---|
+  | FR | dense | 80 % | 100 % | 0,714 | 0,714 | 0,714 |
+  | FR | hybrid 1:1 | 88 % | 88 % | 0,808 | **0,888** | 0,908 |
+  | FR | hybrid 2:1 | 88 % | 98 % | 0,679 | 0,786 | 0,848 |
+  | FR | hybrid 4:1 | 88 % | 98 % | 0,673 | 0,763 | 0,798 |
+  | EN | dense | 90 % | 100 % | 0,718 | 0,718 | 0,718 |
+  | EN | hybrid 1:1 | 90 % | 90 % | 0,841 | **0,841** | 0,842 |
+  | EN | hybrid 2:1 | 90 % | 100 % | 0,779 | 0,783 | 0,798 |
+  | EN | hybrid 4:1 | 90 % | 100 % | 0,798 | 0,798 | 0,798 |
+
+  MRR moyen par catégorie et par pondération (les trois autres lots de la même exécution) :
+
+  | Catégorie | Langue | dense | 1:1 | 2:1 | 4:1 |
+  |---|---|---|---|---|---|
+  | common | FR | 0,457 | 0,519 | 0,512 | 0,526 |
+  | common | EN | 0,453 | 0,385 | 0,442 | 0,500 |
+  | rare-term | FR | 0,820 | 0,856 | 0,847 | 0,847 |
+  | rare-term | EN | 0,870 | 0,886 | 0,873 | 0,873 |
+  | short-query | FR | 0,714 | 0,888 | 0,786 | 0,763 |
+  | short-query | EN | 0,718 | 0,841 | 0,783 | 0,798 |
+
+  Échecs de l'extraction : 4 sur 270 appels (question 2 : 1 en français et 2 en anglais ; question 21 en français : 1), toujours « Wait… ».
+- **Lecture** :
+  - **l'hypothèse est confirmée, avec un effet net** : sur les requêtes courtes, la dense tombe à un MRR de 0,71 (contre 0,82 et 0,87 pour les questions longues à terme rare), et l'hybride à égalité (1:1) monte à 0,888 en français et 0,841 en anglais (+0,17 et +0,12). Le minimum de l'hybride en français (0,808) est au-dessus de la dense. **C'est la première mesure où la recherche par mots-clés sert à ce pour quoi on l'a construite** ;
+  - **l'extraction est bien plus fiable sur une requête courte** : les listes de mots sont presque identiques d'une exécution à l'autre (`kazaplan`, `mailbrew`, `boitata`, `scim` sont extraits à chaque fois), d'où des rangs stables (MRR anglais de 0,841 à 0,842). `mailbrew` n'avait jamais été extrait avec la question longue ;
+  - **l'effet repose sur peu de questions** : la requête 22 (WART, rang 2 → 1), la 26 (Mailbrew, 3 → 1) et la 30 (CORS « Failed to fetch », 6 → 1 en français) font le gain ; la requête 23 (`svc.cluster.local`) recule de 7 à 12-13, ses mots `docs` et `swagger` étant banals ;
+  - **la pondération optimale dépend du type de requête** : sur les requêtes courtes, plus la dense pèse, plus le MRR baisse (1:1 > 2:1 > 4:1), exactement l'inverse des questions en anglais « common » (0,385 < 0,442 < 0,500). Pour la requête 26, la référence est classée 1 à 1:1 et retombe à 3 dès 2:1 : la dense écrase un mot rare pourtant bien extrait. **Il n'existe pas de poids unique qui serve les deux usages** ;
+  - **en moyenne sur les trois catégories, l'hybride dépasse la dense avec toutes les pondérations** : en français 0,754 (1:1) contre 0,664 pour la dense ; en anglais 0,704 (1:1) à 0,724 (4:1) contre 0,680. La moyenne dépend de la répartition des catégories, que nous avons choisie ;
+  - **la progression de 4:1 sur « common » ne se reproduit qu'en anglais** : en français, 1:1, 2:1 et 4:1 sont à plat (0,519, 0,512, 0,526) ;
+  - **les échecs d'extraction ne se concentrent pas sur une question** (E20 le laissait croire) : questions 8, 2, 13 et 21 selon les lots. Cumul : environ 8 échecs sur 570 appels (1,4 %).
+- **Réserves** :
+  - **ces requêtes ont été écrites après avoir vu les résultats d'E20** (donc en connaissant les termes que l'extraction perdait) et à partir des mêmes fils que les questions 11 à 20 ; 10 requêtes, avec un gain porté par 3 ;
+  - Hit@10 de 88 % pour 1:1 en français : la requête 23 sort du top 10 à ce poids, et un échec d'extraction (requête 21) coûte 2 points ;
+  - les trois lots d'une exécution partagent leurs mots-clés : les écarts entre lots d'une même ligne ne sont pas indépendants.
+- **Leçons** :
+  - **un jeu d'évaluation est un choix de population de requêtes** : la même recherche gagne ou perd selon qu'elle est interrogée avec une question en langage naturel ou une requête de type identifiant ; le chiffre global dépend de la proportion de chacune ;
+  - **la fusion à poids fixe fait un compromis** entre deux usages qui demandent des poids opposés ;
+  - **l'extraction par LLM est un maillon plus fragile sur les phrases longues** (elle perd les noms de produits) que sur les requêtes courtes, où elle recopie presque tout ;
+  - **un résultat négatif d'E20 ne se corrige pas en écrivant le jeu qui donne le résultat attendu** : ici le résultat est cohérent avec l'hypothèse, mais il vient d'un jeu écrit après coup, donc à confirmer sur des requêtes que l'on n'a pas vues.
+- **Suite possible** : poids choisi selon la longueur de la requête (ou un seuil sur la longueur de la requête), extraction qui s'appuie sur l'IDF du corpus (garder les mots rares, plutôt que de laisser le LLM choisir), repli sur la dense quand l'extraction échoue (1,4 % d'échecs), puis le reranking.
+
 ---
 
 ## 3. Historique des mesures
@@ -469,6 +665,22 @@ Le projet a commencé sur un PDF technique, avant de passer à Slack. Les leçon
 | 2026-11-20 | inchangé : extraction des mots-clés par un LLM, non branchée sur le banc (E16) | 60 % | 70 % | 0,453 |
 | 2026-11-20 | recherche hybride dense + mots-clés, fusion RRF (constante 60, profondeur 30), questions en français (E17) | 80 % | 90 % | 0,560 |
 | 2026-11-20 | idem, questions en anglais (E17) | 70 % | 80 % | 0,419 |
+| 2026-11-20 | recherche hybride, moyenne de 5 exécutions, questions en français (E18) | 72 % | 88 % | 0,467 (0,387 à 0,502) |
+| 2026-11-20 | idem, questions en anglais (E18) | 54 % | 80 % | 0,391 (0,297 à 0,513) |
+| 2026-11-20 | hybride 2:1 (dense deux fois plus lourde), moyenne de 5 exécutions, français (E19) | 76 % | 90 % | 0,486 (0,397 à 0,556) |
+| 2026-11-20 | hybride 4:1, français (E19) | 76 % | 90 % | 0,531 (0,412 à 0,593) |
+| 2026-11-20 | hybride 2:1, anglais (E19) | 58 % | 80 % | 0,406 (0,289 à 0,489) |
+| 2026-11-20 | hybride 4:1, anglais (E19) | 70 % | 80 % | 0,433 (0,339 à 0,495) |
+| 2026-11-20 | jeu à 20 questions, catégorie rare-term, dense, français (E20) | 100 % | 100 % | 0,820 |
+| 2026-11-20 | idem, hybride 4:1, français (E20) | 96 % | 98 % | 0,805 (0,758 à 0,867) |
+| 2026-11-20 | idem, dense, anglais (E20) | 100 % | 100 % | 0,870 |
+| 2026-11-20 | idem, hybride 4:1, anglais (E20) | 96 % | 100 % | 0,870 (0,867 à 0,875) |
+| 2026-11-21 | jeu à 30 questions, catégorie short-query, dense, français (E21) | 80 % | 100 % | 0,714 |
+| 2026-11-21 | idem, hybride 1:1, français (E21) | 88 % | 88 % | 0,888 (0,808 à 0,908) |
+| 2026-11-21 | idem, hybride 4:1, français (E21) | 88 % | 98 % | 0,763 (0,673 à 0,798) |
+| 2026-11-21 | idem, dense, anglais (E21) | 90 % | 100 % | 0,718 |
+| 2026-11-21 | idem, hybride 1:1, anglais (E21) | 90 % | 90 % | 0,841 (0,841 à 0,842) |
+| 2026-11-21 | idem, hybride 4:1, anglais (E21) | 90 % | 100 % | 0,798 |
 
 ---
 
@@ -534,7 +746,7 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 
 1. **Mesurer le bruit de formulation** : ajouter une ou deux reformulations françaises par question, écrites sans connaître les fils de référence (par exemple par un LLM), et observer la variation des rangs (E14). Permet de savoir quel écart est significatif avant de juger les expériences suivantes.
 2. **Reranking** : récupérer 30 candidats par la recherche dense, puis les faire reclasser par un modèle qui lit la question et chaque fil ensemble (cross-encoder ou LLM). Cible : les questions 5, 9 et 10, dont les références sont dans le top 30 dense mais mal classées (E13).
-3. **Recherche hybride** : faite et mesurée (E17), non branchée sur `/rag/ask`. Gain net en français (Hit@10 70 → 90 %), bilan mitigé en anglais (MRR en baisse). Pistes : mesurer le bruit de l'extraction par plusieurs exécutions, pondérer la dense plus fortement dans la fusion ou réduire la profondeur des mots-clés, ajouter au jeu des questions à **terme rare** (identifiant, nom d'application, code peu fréquent), mots groupés par concept (E13), vrai BM25. Brancher l'hybride sur la génération demande de charger le texte d'un fil à partir de son identifiant.
+3. **Recherche hybride** : faite et mesurée (E17), non branchée sur `/rag/ask`. Gain net en français (Hit@10 70 → 90 %), bilan mitigé en anglais (MRR en baisse). Le bruit a été mesuré en E18 et la pondération de la dense testée en E19 (4:1 donne le meilleur MRR mais fait reculer la question 10, un cas de terme rare). Pistes : réduire la profondeur des mots-clés, repli sur la dense si l'extraction échoue, ajouter au jeu des questions à **terme rare** (identifiant, nom d'application, code peu fréquent), mots groupés par concept (E13), vrai BM25. Brancher l'hybride sur la génération demande de charger le texte d'un fil à partir de son identifiant.
 4. **Expansion de requête** : faire reformuler la question en plusieurs variantes par un LLM (`MultiQueryExpander` de Spring AI), chercher avec chacune, puis fusionner. Cible : le décalage de vocabulaire (E7) et la sensibilité à la formulation (E14, plafond optimiste de 80 % de Hit@10). Attention à l'effet observé en E13 avec les synonymes.
 5. **Résumé structuré à l'ingestion** : faire réécrire chaque fil en *Problème / Cause / Solution*, et vectoriser ce résumé. Coût : un appel LLM par fil.
 6. **Ajuster la consigne sur les dates** (E10).
@@ -543,7 +755,7 @@ Par ordre de priorité, chacune à mesurer contre la référence de la section 3
 9. **Industrialiser** : tests d'intégration autonomes (Testcontainers), schéma géré par Liquibase, refactoring en architecture hexagonale.
 10. **Anonymisation plus fine** : garder une partie utile et non sensible des valeurs masquées (`[HOST:prep]`, `[HOST:prod]`), pour ne pas perdre l'environnement concerné (E13).
 11. **Nettoyage** : un emoji collé à un mot (`:question:Submitted`) n'est pas retiré.
-12. **Extraction de mots-clés avec un modèle local léger** (E18, après la mesure de l'hybride) : comparer, avec `KeywordExtractionExplorationTest`, la qualité des mots, la latence (référence : environ 1 s avec Claude Haiku) et le coût d'un petit modèle de chat servi par Ollama. Demande de construire les `ChatClient` à la main (le `ChatClient.Builder` automatique devient ambigu avec deux modèles de chat). Risque : traduction et format JSON moins fiables.
+12. **Extraction de mots-clés avec un modèle local léger** (E22, après la mesure de l'hybride) : comparer, avec `KeywordExtractionExplorationTest`, la qualité des mots, la latence (référence : environ 1 s avec Claude Haiku) et le coût d'un petit modèle de chat servi par Ollama. Demande de construire les `ChatClient` à la main (le `ChatClient.Builder` automatique devient ambigu avec deux modèles de chat). Risque : traduction et format JSON moins fiables.
 
 ---
 

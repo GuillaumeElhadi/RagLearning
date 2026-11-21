@@ -258,4 +258,55 @@ class HybridRetrievalServiceTest {
                 .isInstanceOf(IllegalArgumentException.class);
         }
     }
+
+    @Nested
+    class Weights {
+
+        private static final List<String> DENSE = List.of("A", "B", "C");
+
+        private static final List<String> KEYWORDS = List.of("C", "B", "A");
+
+        @BeforeEach
+        void givenOpposedRankings() {
+            givenDenseSearchFinds(DENSE);
+            givenKeywordSearchFinds(List.of("kong"), KEYWORDS);
+        }
+
+        @Test
+        void shouldWeighBothSearchesEquallyByDefault() {
+            assertThat(hybridRetrievalService.findRelatedThreadIds(QUESTION, DEPTH)).containsExactly("A", "C", "B");
+        }
+
+        @Test
+        void shouldGiveTheSameResultWithExplicitEqualWeights() {
+            assertThat(hybridRetrievalService.findRelatedThreadIds(QUESTION, DEPTH, 1, 1))
+                .isEqualTo(hybridRetrievalService.findRelatedThreadIds(QUESTION, DEPTH));
+        }
+
+        @Test
+        void shouldFavorKeywordOrderWhenKeywordSearchWeighsMore() {
+            assertThat(hybridRetrievalService.findRelatedThreadIds(QUESTION, DEPTH, 1, 3)).containsExactly("C", "B", "A");
+        }
+
+        @Test
+        void shouldFavorDenseOrderWhenDenseSearchWeighsMore() {
+            assertThat(hybridRetrievalService.findRelatedThreadIds(QUESTION, DEPTH, 3, 1)).containsExactly("A", "B", "C");
+        }
+
+        @Test
+        void shouldIgnoreKeywordResultsWhenKeywordWeightIsZero() {
+            givenKeywordSearchFinds(List.of("kong"), List.of("D", "A"));
+
+            assertThat(hybridRetrievalService.findRelatedThreadIds(QUESTION, DEPTH, 1, 0)).containsExactly("A", "B", "C");
+        }
+
+        @Test
+        void shouldRejectANegativeWeightWithoutCallingAnyCollaborator() {
+            assertThatThrownBy(() -> hybridRetrievalService.findRelatedThreadIds(QUESTION, DEPTH, -1, 1))
+                .isInstanceOf(IllegalArgumentException.class);
+            assertThatThrownBy(() -> hybridRetrievalService.findRelatedThreadIds(QUESTION, DEPTH, 1, -1))
+                .isInstanceOf(IllegalArgumentException.class);
+            verifyNoInteractions(retrievalService, keywordExtractor, keywordSearchService);
+        }
+    }
 }
